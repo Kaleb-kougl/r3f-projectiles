@@ -1,0 +1,72 @@
+{
+  "name": "@k9kbdev/r3f-projectiles",
+  "version": "0.1.0",
+  "description": "Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 2000+ simultaneous bullets at 60fps.",
+  "license": "MIT",
+  "author": "Kaleb Kougl",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kaleb-Kougl/r3f-projectiles"
+  },
+  "keywords": [
+    "react",
+    "three",
+    "r3f",
+    "react-three-fiber",
+    "projectiles",
+    "particles",
+    "instanced-mesh",
+    "webgl",
+    "3d",
+    "game-dev"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./patterns": {
+      "import": {
+        "types": "./dist/patterns.d.ts",
+        "default": "./dist/patterns.js"
+      },
+      "require": {
+        "types": "./dist/patterns.d.cts",
+        "default": "./dist/patterns.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "@react-three/fiber": ">=8",
+    "three": ">=0.150"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/three": "^0.170.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  }
+}
