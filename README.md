@@ -2,9 +2,9 @@
 
 Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 2 000+ simultaneous bullets at 60 fps.
 
-[![npm](https://img.shields.io/npm/v/@k9kbdev/r3f-projectiles)](https://www.npmjs.com/package/@k9kbdev/r3f-projectiles)
-[![license](https://img.shields.io/npm/l/@k9kbdev/r3f-projectiles)](./LICENSE)
-[![bundle size](https://img.shields.io/bundlephobia/minzip/@k9kbdev/r3f-projectiles)](https://bundlephobia.com/package/@k9kbdev/r3f-projectiles)
+[![version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/Kaleb-Kougl/r3f-projectiles)
+[![license](https://img.shields.io/github/license/Kaleb-Kougl/r3f-projectiles)](./LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-first-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
 ```tsx
 import { Canvas } from '@react-three/fiber';
