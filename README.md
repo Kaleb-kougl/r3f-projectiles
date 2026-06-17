@@ -1,6 +1,6 @@
 # @k9kbdev/r3f-projectiles
 
-Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 2 000+ simultaneous bullets at 60 fps.
+Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 10,000+ simultaneous bullets at 120 fps.
 
 [![npm](https://img.shields.io/npm/v/@k9kbdev/r3f-projectiles)](https://www.npmjs.com/package/@k9kbdev/r3f-projectiles)
 [![license](https://img.shields.io/npm/l/@k9kbdev/r3f-projectiles)](./LICENSE)
@@ -24,7 +24,7 @@ export default function App() {
 ## Features
 
 - **Composable pattern system** — `gen → mod → compose` pipeline for building custom bullet patterns from simple primitives.
-- **GPU-instanced rendering** — a single `<instancedMesh>` drives 2 000+ bullets at 60 fps.
+- **GPU-instanced rendering** — a single `<instancedMesh>` drives 10,000+ bullets at 120 fps.
 - **Zero-allocation render loop** — scratch `Object3D`, `Vector3`, and `Color` objects are created once and reused every frame.
 - **Object pooling** — `acquire()` / `releaseSpawnData()` recycle `BulletSpawnData` objects to eliminate GC pressure.
 - **Accessibility** — `reducedMotion` prop spawns a static snapshot with zero velocity.
@@ -46,6 +46,20 @@ npm install @k9kbdev/r3f-projectiles
 | `react` | `≥ 18` |
 | `@react-three/fiber` | `≥ 8` |
 | `three` | `≥ 0.150` |
+
+---
+
+## Stress Test Example
+
+![10,000 entities at 120 FPS stress test](./assets/stress-test.png)
+
+To see the performance for yourself, run the built-in stress test:
+
+```bash
+npm run dev:stress
+```
+
+This launches a Vite dev server at `localhost:5173` featuring a UI to toggle between patterns, crank the fire rate, and spawn up to 10,000 bullets while tracking your browser's framerate, render time, and memory usage in real-time.
 
 ---
 

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stress Test - R3F Projectiles</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #111;
+        color: white;
+        font-family: sans-serif;
+      }
+        #root {
+        width: 100vw;
+        height: 100vh;
+      }
+      
+      /* --- R3F Stats Panel Positioning --- */
+      .stats-panel {
+        position: absolute !important;
+        top: 10px !important;
+        bottom: auto !important;
+        left: 150px !important;
+        right: auto !important;
+        z-index: 20 !important;
+        opacity: 0.8;
+        display: flex !important;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .stats-panel::before {
+        content: 'PERFORMANCE';
+        display: block;
+        font-family: monospace;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: #a1a1aa;
+        text-align: left;
+        padding-left: 3px;
+        margin-bottom: 2px;
+        line-height: 16px;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+
+      .stats-panel:has(canvas:nth-child(1)[style*="block"])::before,
+      .stats-panel:has(canvas:nth-child(1):not([style*="none"])):not(:has(canvas[style*="block"]))::before {
+        content: 'FRAMERATE';
+      }
+
+      .stats-panel:has(canvas:nth-child(2)[style*="block"])::before {
+        content: 'RENDER TIME (MS)';
+      }
+
+      .stats-panel:has(canvas:nth-child(3)[style*="block"])::before {
+        content: 'MEMORY (MB)';
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

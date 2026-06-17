@@ -22,3 +22,7 @@ export type {
   Modifier,
 } from './types';
 export { PATTERN_LABELS } from './types';
+
+// Utilities
+export { ProjectileTelemetry } from './ProjectileTelemetry';
+export type { ProjectileTelemetryProps } from './ProjectileTelemetry';
