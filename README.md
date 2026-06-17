@@ -51,6 +51,8 @@ npm install @k9kbdev/r3f-projectiles
 
 ## Stress Test Example
 
+![R3F Projectiles Demo](./assets/r3f-projectiles-demo.gif)
+
 ![10,000 entities at 120 FPS stress test](./assets/stress-test.png)
 
 To see the performance for yourself, run the built-in stress test:
