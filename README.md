@@ -51,11 +51,13 @@ npm install @k9kbdev/r3f-projectiles
 
 ## Stress Test Example
 
+**[Play with the live interactive demo here!](https://kaleb-kougl.github.io/r3f-projectiles/)**
+
 ![R3F Projectiles Demo](./assets/r3f-projectiles-demo.gif)
 
 ![20,000 entities at 120 FPS stress test](./assets/stress-test.png)
 
-To see the performance for yourself, run the built-in stress test:
+To see the performance for yourself locally, run the built-in stress test:
 
 ```bash
 npm run dev:stress
