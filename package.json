@@ -57,6 +57,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "dev:stress": "vite examples/stress-test",
+    "build:stress": "vite build examples/stress-test --base=/r3f-projectiles/",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
