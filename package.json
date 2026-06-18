@@ -68,9 +68,12 @@
   "devDependencies": {
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": ">=8",
+    "@react-three/test-renderer": "^9.1.0",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.0.0",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^29.1.1",
     "leva": "^0.10.1",
     "react": ">=18",
     "react-dom": ">=18",

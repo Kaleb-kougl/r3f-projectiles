@@ -32,6 +32,14 @@ export const gen = {
    */
   fibonacciSphere(count: number, radius: number): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
+    if (count === 1) {
+      const p = acquire();
+      p.offset.set(0, 0, 0);
+      p.velocity.set(0, 0, 0);
+      spawns.push(p);
+      return spawns;
+    }
+
     const phi = Math.PI * (3 - Math.sqrt(5)); // Golden Angle
 
     for (let i = 0; i < count; i++) {
@@ -92,6 +100,7 @@ export const gen = {
    */
   galaxy(count: number, radius: number = 4, arms: number = 3, spin: number = 2): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
+    if (arms === 0) arms = 1;
     for (let i = 0; i < count; i++) {
       const armIndex = i % arms;
       const dist = Math.random();
@@ -124,6 +133,13 @@ export const gen = {
    */
   helix(count: number, radius: number = 2, height: number = 4, turns: number = 2): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
+    if (count === 1) {
+      const p = acquire();
+      p.offset.set(0, 0, 0);
+      p.velocity.set(0, 0, 0);
+      spawns.push(p);
+      return spawns;
+    }
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1); // 0 to 1
       const angle = t * Math.PI * 2 * turns;

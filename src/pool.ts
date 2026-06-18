@@ -61,8 +61,12 @@ export function acquire(): BulletSpawnData {
 export function releaseSpawnData(arr: BulletSpawnData[]): void {
   if (!arr) return;
   for (let i = 0; i < arr.length; i++) {
+    const item = arr[i];
+    if (!item) continue;
     if (_pool.length < MAX_POOL_SIZE) {
-      _pool.push(arr[i]);
+      if (!_pool.includes(item)) {
+        _pool.push(item);
+      }
     }
   }
 }

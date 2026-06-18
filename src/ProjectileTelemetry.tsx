@@ -42,7 +42,11 @@ export function ProjectileTelemetry({
       rafId = requestAnimationFrame(loop);
 
       // Update history
-      const count = getCount();
+      let count = getCount();
+      if (typeof count !== 'number' || Number.isNaN(count) || count < 0) {
+        count = 0;
+      }
+      
       const head = headRef.current;
       history[head] = count;
       headRef.current = (head + 1) % historySize;
@@ -68,7 +72,8 @@ export function ProjectileTelemetry({
         const val = history[index];
         
         // Scale to the full canvas height now that there's no text header
-        let barHeight = (val / maxCount) * HEIGHT;
+        // Prevent division by zero if maxCount <= 0
+        let barHeight = maxCount > 0 ? (val / maxCount) * HEIGHT : 0;
         if (barHeight > HEIGHT) barHeight = HEIGHT; // Clamp
         
         if (barHeight > 0) {

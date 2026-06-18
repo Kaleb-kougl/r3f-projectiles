@@ -142,3 +142,67 @@ describe('pool max size cap', () => {
     releaseSpawnData(drained);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+describe('edge cases', () => {
+  it('resets life to 5.0 upon state retrieval verification', () => {
+    const p = acquire();
+    p.life = 10.0;
+    releaseSpawnData([p]);
+    const p2 = acquire();
+    expect(p2.life).toBe(5.0);
+    releaseSpawnData([p2]);
+  });
+
+  it('prevents pool aliasing bugs (double-freeing the same item)', () => {
+    const p = acquire();
+    releaseSpawnData([p]);
+    releaseSpawnData([p]); // double free
+    
+    const p1 = acquire();
+    const p2 = acquire();
+    // If aliased, p1 and p2 would be the exact same object reference
+    expect(p1).not.toBe(p2);
+    
+    releaseSpawnData([p1, p2]);
+  });
+
+  it('handles holey arrays and falsy values safely', () => {
+    const p = acquire();
+    // Create a holey array: index 0 is p, index 1 is empty, index 2 is null, index 3 is undefined
+    const arr: any[] = [];
+    arr[0] = p;
+    arr[2] = null;
+    arr[3] = undefined;
+    
+    expect(() => releaseSpawnData(arr)).not.toThrow();
+    
+    const p1 = acquire();
+    expect(p1.offset).toBeDefined(); // Should not crash
+    expect(p1).toBe(p);
+    releaseSpawnData([p1]);
+  });
+
+  it('handles extreme pool churn (0 to 20_000 boundary conditions)', () => {
+    // Acquire 25,000 objects
+    const batch: BulletSpawnData[] = [];
+    for (let i = 0; i < 25000; i++) {
+      batch.push(acquire());
+    }
+    expect(batch.length).toBe(25000);
+    
+    // Release them all. The pool should cap at 20,000.
+    releaseSpawnData(batch);
+    
+    const batch2: BulletSpawnData[] = [];
+    for (let i = 0; i < 20000; i++) {
+      batch2.push(acquire());
+    }
+    expect(batch2.length).toBe(20000);
+    
+    releaseSpawnData(batch2);
+  });
+});

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Vector3 } from 'three';
 import { gen, mod, compose } from '../patterns';
-import { releaseSpawnData } from '../pool';
+import { acquire, releaseSpawnData } from '../pool';
 import type { BulletSpawnData } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -290,6 +290,68 @@ describe('compose', () => {
       expect(s.color).toBe(0x39ff14);
       expect(s.acceleration.length()).toBeGreaterThan(0);
     }
+    releaseSpawnData(spawns);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+describe('edge cases', () => {
+  it('handles division by zero for count=1 in helix', () => {
+    const spawns = gen.helix(1);
+    expect(spawns).toHaveLength(1);
+    expect(Number.isNaN(spawns[0].offset.x)).toBe(false);
+    expect(Number.isNaN(spawns[0].velocity.x)).toBe(false);
+    releaseSpawnData(spawns);
+  });
+
+  it('handles division by zero for count=1 in fibonacciSphere', () => {
+    const spawns = gen.fibonacciSphere(1, 2);
+    expect(spawns).toHaveLength(1);
+    expect(Number.isNaN(spawns[0].offset.x)).toBe(false);
+    expect(Number.isNaN(spawns[0].velocity.x)).toBe(false);
+    releaseSpawnData(spawns);
+  });
+
+  it('handles arms=0 in galaxy', () => {
+    const spawns = gen.galaxy(10, 4, 0, 2);
+    expect(spawns).toHaveLength(10);
+    for (const s of spawns) {
+      expect(Number.isNaN(s.offset.x)).toBe(false);
+      expect(Number.isNaN(s.velocity.x)).toBe(false);
+    }
+    releaseSpawnData(spawns);
+  });
+
+  it('handles exact vertical velocities in accelerate', () => {
+    const spawns = [acquire()];
+    spawns[0].velocity.set(0, 1, 0); // exact vertical up
+    mod.accelerate(1, 1)(spawns);
+    expect(Number.isNaN(spawns[0].acceleration.x)).toBe(false);
+    expect(spawns[0].acceleration.length()).toBeGreaterThan(0);
+    releaseSpawnData(spawns);
+
+    const spawns2 = [acquire()];
+    spawns2[0].velocity.set(0, -1, 0); // exact vertical down
+    mod.accelerate(1, 1)(spawns2);
+    expect(Number.isNaN(spawns2[0].acceleration.x)).toBe(false);
+    expect(spawns2[0].acceleration.length()).toBeGreaterThan(0);
+    releaseSpawnData(spawns2);
+  });
+
+  it('handles zero-vector rotation edge cases', () => {
+    const spawns = [acquire()];
+    spawns[0].velocity.set(0, 0, 0);
+    spawns[0].offset.set(0, 0, 0);
+    spawns[0].acceleration.set(0, 0, 0);
+    
+    // Rotate around a zero-vector axis
+    mod.rotate(new Vector3(0, 0, 0), Math.PI)(spawns);
+    
+    expect(Number.isNaN(spawns[0].velocity.x)).toBe(false);
+    expect(spawns[0].velocity.length()).toBe(0);
     releaseSpawnData(spawns);
   });
 });
