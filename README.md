@@ -1,6 +1,6 @@
 # @k9kbdev/r3f-projectiles
 
-Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 20,000 simultaneous bullets at 120 fps.
+A composable, GPU-instanced projectile system for React Three Fiber. Render 20,000 simultaneous bullets at 120 fps with a zero-allocation loop.
 
 [![npm](https://img.shields.io/npm/v/@k9kbdev/r3f-projectiles)](https://www.npmjs.com/package/@k9kbdev/r3f-projectiles)
 [![license](https://img.shields.io/npm/l/@k9kbdev/r3f-projectiles)](./LICENSE)
@@ -21,15 +21,15 @@ export default function App() {
 
 ---
 
-## Features
+## Core Capabilities
 
-- **Composable pattern system** — `gen → mod → compose` pipeline for building custom bullet patterns from simple primitives.
-- **GPU-instanced rendering** — a single `<instancedMesh>` drives 20,000 bullets at 120 fps.
-- **Zero-allocation render loop** — scratch `Object3D`, `Vector3`, and `Color` objects are created once and reused every frame.
-- **Object pooling** — `acquire()` / `releaseSpawnData()` recycle `BulletSpawnData` objects to eliminate GC pressure.
-- **Accessibility** — `reducedMotion` prop spawns a static snapshot with zero velocity.
-- **Tree-shakeable** — import just the pattern math (`@k9kbdev/r3f-projectiles/patterns`) without pulling in React.
-- **TypeScript-first** — full type exports for `BulletSpawnData`, `PatternFactory`, `Modifier`, and more.
+- **Composable Patterns**: Chain `gen → mod → compose` to build complex bullet hells from simple math.
+- **GPU Instancing**: Push 20,000 bullets at 120 fps through a single `<instancedMesh>`.
+- **Zero Allocation**: I create scratch `Object3D`, `Vector3`, and `Color` objects once and reuse them every frame. No garbage collection spikes.
+- **Object Pooling**: `acquire()` and `releaseSpawnData()` recycle object state to eliminate allocation pressure.
+- **Accessibility Built-In**: Use `reducedMotion` to render a static, zero-velocity snapshot for motion-sensitive users.
+- **Tree-Shakeable**: Import raw pattern math from `@k9kbdev/r3f-projectiles/patterns`. Leave React behind if you don't need it.
+- **TypeScript Native**: Shipped with complete type definitions.
 
 ---
 
@@ -49,21 +49,21 @@ npm install @k9kbdev/r3f-projectiles
 
 ---
 
-## Stress Test Example
+## Stress Test
 
-**[Play with the live interactive demo here!](https://kaleb-kougl.github.io/r3f-projectiles/)**
+**[Play the live interactive demo here.](https://kaleb-kougl.github.io/r3f-projectiles/)**
 
 ![R3F Projectiles Demo](./assets/r3f-projectiles-demo.gif)
 
 ![20,000 entities at 120 FPS stress test](./assets/stress-test.png)
 
-To see the performance for yourself locally, run the built-in stress test:
+Run the built-in stress test to see it scale:
 
 ```bash
 npm run dev:stress
 ```
 
-This launches a Vite dev server at `localhost:5173` featuring a UI to toggle between patterns, crank the fire rate, and spawn up to 20,000 bullets while tracking your browser's framerate, render time, and memory usage in real-time.
+Spin up a local Vite server. Toggle patterns, crank the fire rate, and spawn 20,000 bullets while monitoring framerate, render time, and memory usage.
 
 ---
 
@@ -112,7 +112,7 @@ export default function App() {
 
 ### `<BulletManager>`
 
-A fully props-driven R3F component backed by a single `<instancedMesh>`. Accepts a `ref` for imperative control.
+A props-driven R3F component backed by a single `<instancedMesh>`. Pass a `ref` for imperative control.
 
 #### Props
 
@@ -140,7 +140,7 @@ A fully props-driven R3F component backed by a single `<instancedMesh>`. Accepts
 | `'rose3D'` | 3D rhodonea rose curve. |
 | `'ring'` | Flat ring expanding outward. |
 
-Human-readable labels for UI dropdowns are available as `PATTERN_LABELS`:
+Human-readable labels for UI dropdowns are available via `PATTERN_LABELS`:
 
 ```ts
 import { PATTERN_LABELS } from '@k9kbdev/r3f-projectiles';
@@ -151,7 +151,7 @@ import { PATTERN_LABELS } from '@k9kbdev/r3f-projectiles';
 
 ### Pattern Generators (`gen.*`)
 
-Each generator returns an array of pool-acquired `BulletSpawnData`. Call `releaseSpawnData()` after consumption.
+Generators yield pool-acquired `BulletSpawnData` arrays. Call `releaseSpawnData()` when finished.
 
 | Generator | Signature | Description |
 |---|---|---|
@@ -166,20 +166,20 @@ Each generator returns an array of pool-acquired `BulletSpawnData`. Call `releas
 
 ### Pattern Modifiers (`mod.*`)
 
-Modifiers are curried — call with config to get a `Modifier` function. Modifiers mutate spawn data in-place and return the array.
+Modifiers are curried. Call them with a configuration to receive a `Modifier` function. They mutate spawn data in-place.
 
 | Modifier | Signature | Description |
 |---|---|---|
 | `mod.color` | `(hex: number)` | Set a uniform color on every bullet. |
 | `mod.accelerate` | `(forward: number, lateral?: number)` | Apply forward and/or lateral acceleration. |
-| `mod.sequence` | `(delayStep: number)` | Stagger spawn times so bullets appear in sequence. |
+| `mod.sequence` | `(delayStep: number)` | Stagger spawn times to sequence bullet appearance. |
 | `mod.rotate` | `(axis: Vector3, angle: number)` | Rotate all offsets, velocities, and accelerations. |
 
 ---
 
 ### `compose()`
 
-Pipe a generator result through zero or more modifiers. Modifiers are applied left-to-right and mutate the array in-place.
+Pipe a generator result through multiple modifiers. Execution runs left-to-right, mutating the array in-place.
 
 ```ts
 import { gen, mod, compose } from '@k9kbdev/r3f-projectiles';
@@ -205,7 +205,7 @@ function compose(
 
 ### Imperative Handle
 
-Attach a ref to access `fire()`, `clear()`, and `activeCount`:
+Attach a ref to access imperative controls:
 
 ```tsx
 import { useRef } from 'react';
@@ -219,7 +219,7 @@ function Scene() {
       <BulletManager ref={ref} pattern="galaxy" />
       <button onClick={() => ref.current?.fire()}>Fire!</button>
       <button onClick={() => ref.current?.clear()}>Clear</button>
-      {/* ref.current?.activeCount — read the live bullet count */}
+      {/* ref.current?.activeCount exposes the live bullet count */}
     </>
   );
 }
@@ -235,7 +235,7 @@ function Scene() {
 
 ### Custom Material
 
-Override the default `<meshBasicMaterial>` by passing a child:
+Override the default `<meshBasicMaterial>` by passing a child material:
 
 ```tsx
 <BulletManager pattern="galaxy">
@@ -247,28 +247,28 @@ Override the default `<meshBasicMaterial>` by passing a child:
 
 ### Object Pool (`acquire` / `releaseSpawnData`)
 
-Low-level API for custom pattern generators.
+The low-level API powering custom pattern generators.
 
 ```ts
 import { acquire, releaseSpawnData } from '@k9kbdev/r3f-projectiles';
 
-// Get a reset BulletSpawnData from the pool (or a fresh allocation)
+// Fetch a clean BulletSpawnData from the pool
 const bullet = acquire();
 bullet.offset.set(1, 0, 0);
 bullet.velocity.set(0, 1, 0);
 
-// After consumption, return the array to the pool
+// Return the array to the pool when finished
 const batch = [bullet];
 releaseSpawnData(batch);
 ```
 
-`acquire()` returns objects with zeroed vectors, `delay = 0`, `color = null`, `life = 5.0`. The pool caps at 20 000 objects.
+`acquire()` yields objects with zeroed vectors, no delay, and a standard life span. The pool strictly caps at 20,000 instances.
 
 ---
 
-## Creating Custom Patterns
+## Custom Patterns
 
-### Simple radial burst
+### Radial Burst
 
 ```ts
 import { gen, mod, compose } from '@k9kbdev/r3f-projectiles';
@@ -280,7 +280,7 @@ const redBurst = () => compose(
 );
 ```
 
-### Sequenced helix with lateral drift
+### Sequenced Helix with Drift
 
 ```ts
 import { Vector3 } from 'three';
@@ -294,7 +294,7 @@ const driftingHelix = () => compose(
 );
 ```
 
-### Rotated torus knot
+### Rotated Torus Knot
 
 ```ts
 import { Vector3 } from 'three';
@@ -307,7 +307,7 @@ const tiltedKnot = () => compose(
 );
 ```
 
-Use any of these as the `pattern` prop:
+Apply your pattern using the `pattern` prop:
 
 ```tsx
 <BulletManager pattern={driftingHelix} fireRate={1} />
@@ -317,7 +317,7 @@ Use any of these as the `pattern` prop:
 
 ## Zustand Integration
 
-Wire `BulletManager` to a Zustand store for reactive pattern switching:
+Bind `BulletManager` to a Zustand store for reactive pattern control:
 
 ```tsx
 import { create } from 'zustand';
@@ -376,33 +376,33 @@ export default function App() {
 
 ---
 
-## Design Decisions
+## Architecture
 
-### Zero-allocation render loop
+### Zero-Allocation Render Loop
 
-Every frame updates up to `maxBullets` (default: 2,000) bullet transforms. To avoid triggering garbage collection, the `useFrame` callback never allocates. All `Object3D`, `Vector3`, and `Color` scratch objects (`_dummy`, `_tempColor`, `_sourcePos`) are created once in `useMemo` and reused on every frame call. `addScaledVector(v, dt)` updates physics in-place.
+I update up to 2,000 bullet transforms per frame by default. The `useFrame` callback never allocates memory, preventing garbage collection stutters. Scratch objects (`Object3D`, `Vector3`, `Color`) initialize once in `useMemo` and recycle endlessly. Physics update in-place via `addScaledVector`.
 
-### Object pooling (`acquire` / `releaseSpawnData`)
+### Object Pooling
 
-Pattern generators call `acquire()` to get a `BulletSpawnData` — either from the free list or a fresh allocation. After the spawner consumes the data, `releaseSpawnData()` returns the objects to the pool. The pool is capped at 20 000 to bound memory. This avoids per-burst allocation pressure that would otherwise create thousands of short-lived objects.
+Pattern generators call `acquire()` to fetch `BulletSpawnData` from the free list or allocate new memory if empty. Once consumed, `releaseSpawnData()` returns objects to the pool. I hard-cap the pool at 20,000 to strictly bound memory usage and eliminate per-burst allocation pressure.
 
-### GPU buffer optimization
+### GPU Buffer Optimization
 
-`instanceMatrix.setUsage(DynamicDrawUsage)` hints to the GPU driver that the buffer is written every frame. The `needsUpdate = true` flag is set **once** after the full bullet loop — never per-bullet — to batch the GPU upload.
+I hint `DynamicDrawUsage` to the GPU driver, acknowledging per-frame buffer writes. I flag `needsUpdate = true` exactly once after the full bullet loop, batching the entire GPU upload.
 
-### Functional composition (`gen` / `mod` / `compose`)
+### Functional Composition
 
-The pattern API is intentionally functional: generators produce data, modifiers transform it, and `compose()` pipes them together. This makes patterns composable without inheritance and enables tree-shaking — import `@k9kbdev/r3f-projectiles/patterns` to use the math without React.
+The pattern API uses a strict functional approach: generators produce data, modifiers transform it, and `compose()` connects them. This sidesteps inheritance for pure composition and guarantees tree-shaking.
 
-### Accessibility (`reducedMotion`)
+### Motion Sensitivity
 
-When `reducedMotion` is `true`, the component spawns a single static snapshot (capped at 200 bullets) with zero velocity. No animation runs — the `useFrame` callback returns immediately after the one-time spawn. This respects `prefers-reduced-motion` while still showing the pattern shape.
+Setting `reducedMotion` to `true` spawns a single static snapshot of up to 200 bullets. Velocity locks at zero. No animation runs. This respects system-level `prefers-reduced-motion` preferences while retaining the pattern's visual identity.
 
 ---
 
 ## Accessibility
 
-Use the `reducedMotion` prop to respect user preferences:
+Respect user preferences with the `reducedMotion` prop:
 
 ```tsx
 const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -410,30 +410,28 @@ const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').mat
 <BulletManager pattern="galaxy" reducedMotion={prefersReduced} />
 ```
 
-This spawns a static, non-animated snapshot of the pattern — safe for users sensitive to motion.
+This guarantees a static, non-animated snapshot safe for users sensitive to motion.
 
 ---
 
-## Tree-Shaking: Patterns without React
+## Tree-Shaking
 
-The pattern math is available as a separate entry point that does not import React or R3F:
+Access the raw pattern math as a standalone module independent of React and R3F:
 
 ```ts
 import { gen, mod, compose } from '@k9kbdev/r3f-projectiles/patterns';
 ```
 
-Use this in non-React contexts (e.g. a plain three.js app, a server-side generator, or tests).
-
 ---
 
 ## Contributing
 
-1. Fork the repo
-2. Create a feature branch: `git checkout -b feat/my-pattern`
-3. Install: `npm install`
-4. Dev: `npm run dev`
-5. Test: `npm test`
-6. PR against `main`
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feat/my-feature`
+3. Install dependencies: `npm install`
+4. Run dev server: `npm run dev`
+5. Run tests: `npm test`
+6. Submit a PR against `main`
 
 ---
 
