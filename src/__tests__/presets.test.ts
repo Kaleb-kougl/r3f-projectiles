@@ -31,8 +31,9 @@ describe('resolvePattern', () => {
   });
 
   it('bypasses type narrowing for string-like objects or unions', () => {
-    // If a user bypasses type narrowing with `any` but passes a valid key, it should still work
-    const dynamicKey: any = 'ring';
+    // If a user bypasses type narrowing with `@ts-expect-error` but passes a valid key, it should still work
+    const dynamicKey = 'ring' as unknown;
+    // @ts-expect-error intentional testing of type bypass
     const spawns = resolvePattern(dynamicKey);
     expect(spawns.length).toBeGreaterThan(0);
     releaseSpawnData(spawns);

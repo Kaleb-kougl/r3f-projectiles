@@ -173,7 +173,7 @@ describe('edge cases', () => {
   it('handles holey arrays and falsy values safely', () => {
     const p = acquire();
     // Create a holey array: index 0 is p, index 1 is empty, index 2 is null, index 3 is undefined
-    const arr: any[] = [];
+    const arr: (BulletSpawnData | null | undefined)[] = [];
     arr[0] = p;
     arr[2] = null;
     arr[3] = undefined;

@@ -8,10 +8,10 @@
  * ```
  */
 
-import React, { useRef } from 'react';
+import { useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Stats } from '@react-three/drei';
-import { BulletManager, ProjectileTelemetry, type BulletManagerHandle } from '@k9kbdev/r3f-projectiles';
+import { BulletManager, ProjectileTelemetry, type BulletManagerHandle, type PatternKey } from '@k9kbdev/r3f-projectiles';
 import { useControls } from 'leva';
 
 export default function App() {
@@ -46,7 +46,7 @@ export default function App() {
       <Canvas camera={{ position: [0, 8, 20], fov: 60 }}>
         <BulletManager
           ref={managerRef}
-          pattern={pattern as any}
+          pattern={pattern as PatternKey}
           fireRate={fireRate}
           maxBullets={maxBullets}
           paused={paused}

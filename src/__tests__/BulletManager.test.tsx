@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/react';
+
 import ReactThreeTestRenderer from '@react-three/test-renderer';
 import { BulletManager } from '../BulletManager';
 import { BulletManagerHandle } from '../types';
@@ -25,7 +25,7 @@ describe('BulletManager', () => {
       return <BulletManager ref={ref} maxBullets={500} paused={true} pattern="ring" />;
     };
 
-    const renderer = await ReactThreeTestRenderer.create(<TestComponent />);
+    await ReactThreeTestRenderer.create(<TestComponent />);
     
     expect(bulletRef?.current).toBeDefined();
     expect(bulletRef!.current!.activeCount).toBe(0);
@@ -179,8 +179,8 @@ describe('BulletManager', () => {
       </BulletManager>
     );
 
-    const mesh = renderer.scene.children[0];
-    const material = renderer.scene.findAll((c: any) => c.type && c.type.toLowerCase().includes('material'))[0];
+
+    const material = renderer.scene.findAll((c: { type?: string | ((...args: unknown[]) => unknown) }) => typeof c.type === 'string' && c.type.toLowerCase().includes('material'))[0];
     expect(material).toBeDefined();
     expect(material?.props.emissive).toBe('hotpink');
     expect(material?.props.emissiveIntensity).toBe(2);

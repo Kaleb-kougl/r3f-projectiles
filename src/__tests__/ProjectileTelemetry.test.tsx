@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { render } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProjectileTelemetry } from '../ProjectileTelemetry';
@@ -10,7 +10,7 @@ describe('ProjectileTelemetry', () => {
 
   beforeEach(() => {
     // Spy on animation frame methods
-    rAFSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+    rAFSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => {
       return 123;
     });
     cAFSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
@@ -20,7 +20,7 @@ describe('ProjectileTelemetry', () => {
       fillRect: vi.fn(),
       clearRect: vi.fn(),
       fillStyle: '',
-    } as any);
+    } as unknown as CanvasRenderingContext2D);
   });
 
   afterEach(() => {
@@ -67,7 +67,7 @@ describe('ProjectileTelemetry', () => {
     getContextSpy.mockReturnValue({
       fillRect: mockFillRect,
       fillStyle: '',
-    } as any);
+    } as unknown as CanvasRenderingContext2D);
 
     render(<ProjectileTelemetry getCount={() => 100} maxCount={0} />);
     

@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useEffect, useImperativeHandle, forwardRef } from 'react';
+import { useRef, useMemo, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import {
   Object3D,
