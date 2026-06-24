@@ -5,6 +5,8 @@ export interface ProjectileTelemetryProps extends React.HTMLAttributes<HTMLDivEl
   getCount: () => number;
   /** The maximum expected bullet count for scaling the graph (default: 2000) */
   maxCount?: number;
+  foregroundColor?: string;
+  backgroundColor?: string;
 }
 
 export function ProjectileTelemetry({
