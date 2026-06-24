@@ -10,6 +10,8 @@ export interface ProjectileTelemetryProps extends React.HTMLAttributes<HTMLDivEl
 export function ProjectileTelemetry({
   getCount,
   maxCount = 2000,
+  foregroundColor = '#0ff',
+  backgroundColor = '#002',
   style,
   ...rest
 }: ProjectileTelemetryProps) {
@@ -58,8 +60,8 @@ export function ProjectileTelemetry({
       }
 
       // Colors mimicking mrdoob stats (Cyan theme)
-      const bg = '#002';
-      const fg = '#0ff';
+      const bg = backgroundColor || '#002';
+      const fg = foregroundColor || '#0ff';
 
       // Clear canvas
       ctx.fillStyle = bg;
