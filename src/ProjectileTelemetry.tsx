@@ -102,7 +102,7 @@ export function ProjectileTelemetry({
       }}
       {...rest}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', width: '80px', marginBottom: '4px', alignItems: 'flex-end', paddingLeft: '1px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', width: '80px', marginBottom: '4px', alignItems: 'flex-end', paddingLeft: '1px', backgroundColor: `${backgroundColor || "#002"}` }}>
         <span
           style={{
             fontFamily: 'var(--font-mono, monospace)',
