@@ -122,7 +122,7 @@ export function ProjectileTelemetry({
             fontFamily: 'var(--font-mono, monospace)',
             fontSize: '11px',
             fontWeight: 'bold',
-            color: '#0ff',
+            color: `${color || "var(--color-text, #0ff)"}`,
             lineHeight: '1',
           }}
         >
