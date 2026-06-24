@@ -1,6 +1,6 @@
 {
   "name": "@k9kbdev/r3f-projectiles",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 10,000+ simultaneous bullets at 120fps.",
   "license": "MIT",
   "author": "Kaleb Kougl",
