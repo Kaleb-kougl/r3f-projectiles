@@ -14,7 +14,6 @@ export function ProjectileTelemetry({
   maxCount = 2000,
   foregroundColor = '#0ff',
   backgroundColor = '#002',
-  color = '#0ff',
   style,
   ...rest
 }: ProjectileTelemetryProps) {
@@ -110,7 +109,7 @@ export function ProjectileTelemetry({
             fontSize: '9px',
             fontWeight: 600,
             letterSpacing: '0.05em',
-            color: `${color || "var(--color-text-muted , #8b949e"})`,
+            color: `${foregroundColor || "var(--color-text-muted , #8b949e"})`,
             lineHeight: '1',
           }}
         >
