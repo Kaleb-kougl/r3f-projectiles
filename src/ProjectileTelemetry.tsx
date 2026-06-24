@@ -122,7 +122,7 @@ export function ProjectileTelemetry({
             fontFamily: 'var(--font-mono, monospace)',
             fontSize: '11px',
             fontWeight: 'bold',
-            color: `${color || "var(--color-text, #0ff)"}`,
+            color: `${foregroundColor || "var(--color-text, #0ff)"}`,
             lineHeight: '1',
           }}
         >
@@ -135,7 +135,7 @@ export function ProjectileTelemetry({
           display: 'block',
           width: '80px',
           height: '48px',
-          backgroundColor: '#002', // match mrdoob stats cyan theme
+          backgroundColor: `${backgroundColor ||  "#002"}`  , // match mrdoob stats cyan theme
           borderRadius: '2px',
         }}
       />
