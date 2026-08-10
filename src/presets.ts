@@ -26,6 +26,7 @@ export const BUILTIN_PATTERNS: Record<PatternKey, PatternFactory> = {
   helix: () => compose(gen.helix(200), mod.color(0xff66ff)),
   rose3D: () => compose(gen.rose3D(200), mod.color(0xffff33)),
   ring: () => compose(gen.ring(100), mod.color(0x33ffff)),
+  arc: () => compose(gen.arc(24, Math.PI / 3, 2, 0), mod.color(0x33ffff)),
 };
 
 // ---------------------------------------------------------------------------

@@ -6,14 +6,23 @@ describe('Public API Barrel File (index.ts)', () => {
     const expectedExports = [
       // Components
       'BulletManager',
-      
+      // Phase 4 of docs/bulletfield-emitter-split.md makes the N-emitter form
+      // public. These two strings are the only edit that phase makes to an
+      // existing test — the exact-set assertion at the bottom is deliberately
+      // left as-is, because it is what forces this list to be maintained.
+      'BulletField',
+      'Emitter',
+
       // Pattern system
       'gen',
       'mod',
       'compose',
       'BUILTIN_PATTERNS',
       'resolvePattern',
-      
+
+      // Easing (bullet fade-out)
+      'EASING',
+
       // Pool
       'acquire',
       'releaseSpawnData',

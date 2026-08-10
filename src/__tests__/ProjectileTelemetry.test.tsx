@@ -1,12 +1,18 @@
 
 import { render } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { MockInstance } from 'vitest';
 import { ProjectileTelemetry } from '../ProjectileTelemetry';
 
 describe('ProjectileTelemetry', () => {
-  let rAFSpy: ReturnType<typeof vi.spyOn>;
-  let cAFSpy: ReturnType<typeof vi.spyOn>;
-  let getContextSpy: ReturnType<typeof vi.spyOn>;
+  // `ReturnType<typeof vi.spyOn>` collapses spyOn's generics to their
+  // constraints — `MockInstance<(...args: unknown[]) => unknown>` — which loses
+  // the spied method's real signature and makes `mockImplementation`'s callback
+  // parameters `unknown`. Naming the spied signature keeps `cb` a
+  // `FrameRequestCallback` and keeps `mockReturnValue` checked.
+  let rAFSpy: MockInstance<typeof window.requestAnimationFrame>;
+  let cAFSpy: MockInstance<typeof window.cancelAnimationFrame>;
+  let getContextSpy: MockInstance<typeof HTMLCanvasElement.prototype.getContext>;
 
   beforeEach(() => {
     // Spy on animation frame methods
@@ -56,8 +62,15 @@ describe('ProjectileTelemetry', () => {
   });
 
   it('3. MaxCount edge cases: prevents division by zero if maxCount=0', () => {
-    // Capture the render loop callback to trigger it manually
-    let loopCb: FrameRequestCallback | null = null;
+    // Capture the render loop callback to trigger it manually.
+    //
+    // `= null` alone would give the declaration a control-flow type of `null`:
+    // the only assignment is inside the mock's closure, which TS's flow
+    // analysis cannot see, so `if (loopCb)` would narrow to `never` and
+    // `loopCb(0)` would not be callable. Widening the initializer to the
+    // variable's real domain restores the guard without weakening it — the
+    // runtime `not.toBeNull()` check and the `if` are both untouched.
+    let loopCb = null as FrameRequestCallback | null;
     rAFSpy.mockImplementation((cb) => {
       loopCb = cb;
       return 456;
@@ -91,7 +104,9 @@ describe('ProjectileTelemetry', () => {
   });
 
   it('4. Negative / NaN entity counts: handles negative values or NaN returned by getCount', () => {
-    let loopCb: FrameRequestCallback | null = null;
+    // See the note in test 3 for why the initializer is widened rather than a
+    // bare `= null`.
+    let loopCb = null as FrameRequestCallback | null;
     rAFSpy.mockImplementation((cb) => {
       loopCb = cb;
       return 789;

@@ -1,35 +1,7 @@
-import { useRef, useMemo, useEffect, useImperativeHandle, forwardRef } from 'react';
-import { useFrame } from '@react-three/fiber';
-import {
-  Object3D,
-  Color,
-  Vector3,
-  DynamicDrawUsage,
-  type InstancedMesh as InstancedMeshType,
-} from 'three';
-import { resolvePattern } from './presets';
-import { releaseSpawnData } from './pool';
-import type { BulletManagerProps, BulletManagerHandle, BulletSpawnData } from './types';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** Bullet cap under reduced-motion mode to keep the static snapshot modest. */
-const REDUCED_MOTION_MAX = 200;
-
-// ---------------------------------------------------------------------------
-// Internal types
-// ---------------------------------------------------------------------------
-
-interface BulletState {
-  active: boolean;
-  position: Vector3;
-  velocity: Vector3;
-  acceleration: Vector3;
-  delay: number;
-  life: number;
-}
+import { useRef, useImperativeHandle, forwardRef } from 'react';
+import { BulletField, type BulletFieldHandle } from './BulletField';
+import { Emitter, type EmitterHandle } from './Emitter';
+import type { BulletManagerProps, BulletManagerHandle } from './types';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -38,17 +10,51 @@ interface BulletState {
 /**
  * `<BulletManager>` — a fully props-driven R3F instanced-mesh bullet system.
  *
- * Renders thousands of projectiles using a single `<instancedMesh>` with
- * zero per-frame allocations. All configuration is controlled via props;
+ * Renders thousands of projectiles using a single `<instancedMesh>` driven by
+ * one pooled frame loop — see Performance characteristics for exactly what
+ * "pooled" is and is not claiming. All configuration is controlled via props;
  * there is **no** internal Zustand, Context, or Next.js dependency.
  *
+ * ## Structure
+ * Internally this is a one-emitter {@link BulletField}: the field owns the
+ * mesh, the slot pool, and the single `useFrame`, and this component renders
+ * exactly one `<Emitter>` into it — contributing an origin, a pattern, and a
+ * cadence. At one emitter the split is invisible from the outside, which is
+ * the point: every prop, default, and imperative method behaves exactly as it
+ * always has. The wrapper's only real work is splitting the fourteen props
+ * across the two components and routing `children` to the field's `material`.
+ *
+ * ## Where the defaults live
+ * In `<BulletField>` and `<Emitter>`, not here. This component forwards every
+ * prop exactly as it received it — `undefined` included — and `undefined` is
+ * precisely what makes a destructuring default apply. So each of the fourteen
+ * documented defaults is written down once, in the component that consumes it,
+ * and the wrapper cannot drift from the field because it does not restate
+ * anything. (Through phase 3 it was the other way round: defaults here,
+ * `BulletFieldProps` required. That was the right call while `<BulletField>`
+ * was internal and this was its only caller; a public `<BulletField>` needs
+ * usable defaults of its own, and moving them down is how you get that without
+ * ending up with two copies.) The `@default` tags on
+ * {@link BulletManagerProps} remain this component's contract and are unchanged.
+ *
  * ## Performance characteristics
- * - **Zero-allocation frame loop**: all scratch `Vector3` / `Object3D` /
- *   `Color` objects are created once via `useMemo` and reused every frame.
+ * The loop these describe is {@link BulletField}'s — this component owns none
+ * of it — and the full version of the allocation note lives there.
+ * - **Allocation-free frame loop, with three named exceptions**: every scratch
+ *   `Vector3` / `Object3D` / `Color` is created once via `useMemo` and reused,
+ *   so the loop allocates nothing per frame or per bullet *of its own*. Three
+ *   allocations happen inside calls it makes: three's `addUpdateRange` pushes
+ *   one `{start, count}` record per dirty flush (kept deliberately — it is what
+ *   buys a ~128 KB full-buffer upload down to the slots actually written);
+ *   `resolvePattern` builds a fresh array per burst; and the built-in pattern
+ *   factories go through `compose`, allocating a rest-args array plus one
+ *   modifier closure per call. Only a frame that spawns pays the latter two.
+ *   The `BulletSpawnData` objects in that array are pooled; the array holding
+ *   them is not.
  * - **Frame-rate independent**: physics uses `addScaledVector(v, dt)` with
  *   `dt` clamped to `Math.min(delta, 0.1)`.
- * - **Batched GPU writes**: `needsUpdate = true` is set **once** after the
- *   full bullet loop, never per-bullet.
+ * - **Batched GPU writes**: `needsUpdate` is set **once** after the full bullet
+ *   loop, never per-bullet, and always through the field's `markMatrixDirty`.
  * - **DynamicDrawUsage**: GPU buffer hint applied on mount.
  * - **Pool init at (0, −999, 0)**: prevents first-frame flash.
  *
@@ -74,327 +80,97 @@ interface BulletState {
  */
 export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>(
   function BulletManager(
+    // No defaults here — see "Where the defaults live" above. Every one of
+    // these is forwarded verbatim, and an omitted prop arrives at
+    // `<BulletField>` or `<Emitter>` as `undefined`, which is what triggers the
+    // single definition of its default there.
     {
-      maxBullets = 2000,
-      pattern = 'fibonacciSphere',
-      fireRate = 1.5,
-      paused = false,
-      reducedMotion = false,
-      boundsLimit = 25,
-      spawnCenterY = 3,
-      rotationSpeed = 0.3,
+      maxBullets,
+      pattern,
+      fireRate,
+      paused,
+      reducedMotion,
+      boundsLimit,
+      spawnCenterY,
+      rotationSpeed,
+      origin,
+      bulletRadius,
+      fadeTime,
+      fadeCurve,
       children,
       onBulletCount,
     },
     ref,
   ) {
-    const meshRef = useRef<InstancedMeshType | null>(null);
-    const bulletsRef = useRef<BulletState[]>([]);
-    const timeAccum = useRef(0);
-    const sourceRotation = useRef(0);
-    const reducedMotionSpawned = useRef(false);
-
-    // ---- Prop refs for reading inside useFrame without stale closures ------
-    const propsRef = useRef({
-      pattern,
-      fireRate,
-      paused,
-      reducedMotion,
-      boundsLimit,
-      spawnCenterY,
-      rotationSpeed,
-      onBulletCount,
-    });
-    propsRef.current = {
-      pattern,
-      fireRate,
-      paused,
-      reducedMotion,
-      boundsLimit,
-      spawnCenterY,
-      rotationSpeed,
-      onBulletCount,
-    };
-
-    // ---- Scratch objects (allocated ONCE, reused every frame) --------------
-    const { _dummy, _tempColor, _sourcePos } = useMemo(
-      () => ({
-        _dummy: new Object3D(),
-        _tempColor: new Color(),
-        _sourcePos: new Vector3(),
-      }),
-      [],
-    );
-
-    // ---- Pool initialization (mount only) ----------------------------------
-    useEffect(() => {
-      const mesh = meshRef.current;
-      if (!mesh) return;
-
-      // Allocate the CPU-side bullet state array ONCE
-      const pool: BulletState[] = new Array(maxBullets);
-      for (let i = 0; i < maxBullets; i++) {
-        pool[i] = {
-          active: false,
-          position: new Vector3(),
-          velocity: new Vector3(),
-          acceleration: new Vector3(),
-          delay: 0,
-          life: 0,
-        };
-      }
-      bulletsRef.current = pool;
-
-      // GPU buffer hint — tells the driver we'll update every frame
-      mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-
-      // Prevent first-frame flash: park every instance off-screen + black
-      for (let i = 0; i < maxBullets; i++) {
-        _dummy.position.set(0, -999, 0);
-        _dummy.scale.set(1, 1, 1);
-        _dummy.updateMatrix();
-        mesh.setMatrixAt(i, _dummy.matrix);
-        mesh.setColorAt(i, _tempColor.set(0x000000));
-      }
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.instanceColor!.needsUpdate = true;
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [maxBullets]);
-
-    // ---- Internal spawn function (zero-allocation) -------------------------
-    const spawnBullets = useMemo(() => {
-      return (
-        mesh: InstancedMeshType,
-        bullets: BulletState[],
-        sourcePos: Vector3,
-        spawnData: BulletSpawnData[],
-        zeroVelocity: boolean,
-        cap?: number,
-      ) => {
-        let spawned = 0;
-        for (let d = 0; d < spawnData.length; d++) {
-          if (cap !== undefined && spawned >= cap) break;
-
-          // Find an inactive slot
-          let slotIdx = -1;
-          for (let i = 0; i < bullets.length; i++) {
-            if (!bullets[i].active) {
-              slotIdx = i;
-              break;
-            }
-          }
-          if (slotIdx === -1) break; // pool exhausted
-
-          const data = spawnData[d];
-          const bullet = bullets[slotIdx];
-
-          bullet.active = true;
-          bullet.position.copy(sourcePos).add(data.offset);
-          bullet.delay = data.delay;
-          bullet.life = data.life;
-
-          if (zeroVelocity) {
-            bullet.velocity.set(0, 0, 0);
-            bullet.acceleration.set(0, 0, 0);
-          } else {
-            bullet.velocity.copy(data.velocity);
-            bullet.acceleration.copy(data.acceleration);
-          }
-
-          // Zero-allocation color set — reuse _tempColor scratch object
-          _tempColor.set(data.color ?? 0xff3333);
-          mesh.setColorAt(slotIdx, _tempColor);
-
-          // If no delay, position immediately; otherwise hide at -999
-          if (bullet.delay <= 0) {
-            _dummy.position.copy(bullet.position);
-            _dummy.scale.set(1, 1, 1);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(slotIdx, _dummy.matrix);
-          } else {
-            _dummy.position.set(0, -999, 0);
-            _dummy.scale.set(0, 0, 0);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(slotIdx, _dummy.matrix);
-          }
-
-          spawned++;
-        }
-      };
-    }, [_dummy, _tempColor]);
+    const fieldRef = useRef<BulletFieldHandle | null>(null);
+    const emitterRef = useRef<EmitterHandle | null>(null);
 
     // ---- Imperative handle -------------------------------------------------
+    //
+    // The three field-wide methods forward to the field; `fire()` forwards to
+    // this wrapper's single emitter, which is what keeps its four documented
+    // differences from the frame loop (static origin fallback, no cadence or
+    // orbit advance, works while paused, flushes inline) intact. Both refs are
+    // resolved at call time, so the handle object never has to be rebuilt.
     useImperativeHandle(
       ref,
       () => ({
         /** Manually trigger one burst of the current pattern. */
         fire() {
-          const mesh = meshRef.current;
-          if (!mesh) return;
-          const bullets = bulletsRef.current;
-          const { pattern: pat, spawnCenterY: cy } = propsRef.current;
-
-          _sourcePos.set(0, cy, 0);
-          const spawnData = resolvePattern(pat);
-          spawnBullets(mesh, bullets, _sourcePos, spawnData, false);
-          releaseSpawnData(spawnData);
-
-          mesh.instanceMatrix.needsUpdate = true;
-          if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+          emitterRef.current?.fire();
         },
 
         /** Deactivate all bullets and reset the simulation timer. */
         clear() {
-          const mesh = meshRef.current;
-          if (!mesh) return;
-          const bullets = bulletsRef.current;
-
-          for (let i = 0; i < bullets.length; i++) {
-            bullets[i].active = false;
-            _dummy.position.set(0, -999, 0);
-            _dummy.scale.set(0, 0, 0);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(i, _dummy.matrix);
-          }
-          timeAccum.current = 0;
-          reducedMotionSpawned.current = false;
-
-          mesh.instanceMatrix.needsUpdate = true;
+          fieldRef.current?.clear();
         },
 
         /** Number of bullets currently alive. */
         get activeCount(): number {
-          let count = 0;
-          const bullets = bulletsRef.current;
-          for (let i = 0; i < bullets.length; i++) {
-            if (bullets[i].active) count++;
-          }
-          return count;
+          return fieldRef.current?.activeCount ?? 0;
+        },
+
+        /**
+         * Iterate active, visible bullets; consume any for which `cb` returns
+         * `true`. Delayed (not-yet-visible) bullets are skipped so a hit test
+         * never lands on a parked instance.
+         */
+        forEachActive(cb) {
+          fieldRef.current?.forEachActive(cb);
         },
       }),
-      [_dummy, _sourcePos, spawnBullets],
+      [],
     );
 
-    // ---- Frame loop --------------------------------------------------------
-    useFrame((_state, delta) => {
-      const mesh = meshRef.current;
-      if (!mesh) return;
-
-      const props = propsRef.current;
-
-      // Respect paused prop
-      if (props.paused) return;
-
-      const dt = Math.min(delta, 0.1); // clamp to prevent spiral-of-death
-      const bullets = bulletsRef.current;
-
-      // ---- Reduced motion: spawn once, skip timer & rotation ----
-      if (props.reducedMotion) {
-        if (!reducedMotionSpawned.current) {
-          reducedMotionSpawned.current = true;
-          _sourcePos.set(0, props.spawnCenterY, 0);
-          const spawnData = resolvePattern(props.pattern);
-          spawnBullets(mesh, bullets, _sourcePos, spawnData, true, REDUCED_MOTION_MAX);
-          releaseSpawnData(spawnData);
-
-          // Flush the one-time update
-          mesh.instanceMatrix.needsUpdate = true;
-          if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-        }
-        return; // no animation under reduced motion
-      }
-
-      // Reset flag if consumer toggles reduced motion off
-      reducedMotionSpawned.current = false;
-
-      // ---- Auto-fire timer ----
-      timeAccum.current += dt;
-      const fireInterval = 1 / props.fireRate;
-
-      if (timeAccum.current >= fireInterval) {
-        timeAccum.current -= fireInterval;
-
-        // Orbit source position around Y axis
-        sourceRotation.current += props.rotationSpeed * fireInterval;
-        const rot = sourceRotation.current;
-        _sourcePos.set(
-          Math.cos(rot) * 2,
-          props.spawnCenterY,
-          Math.sin(rot) * 2,
-        );
-
-        const spawnData = resolvePattern(props.pattern);
-        spawnBullets(mesh, bullets, _sourcePos, spawnData, false);
-        releaseSpawnData(spawnData);
-      }
-
-      // ---- Update all active bullets ----
-      let activeCount = 0;
-      for (let i = 0; i < bullets.length; i++) {
-        const b = bullets[i];
-        if (!b.active) continue;
-
-        // Handle delay countdown
-        if (b.delay > 0) {
-          b.delay -= dt;
-          if (b.delay > 0) {
-            activeCount++;
-            // Still waiting — keep hidden
-            continue;
-          }
-          // Delay just ended — fall through to normal update
-        }
-
-        // Frame-rate independent physics
-        b.velocity.addScaledVector(b.acceleration, dt);
-        b.position.addScaledVector(b.velocity, dt);
-        b.life -= dt;
-
-        // Deactivate: lifetime expired or out of bounds
-        if (
-          b.life <= 0 ||
-          Math.abs(b.position.x) > props.boundsLimit ||
-          Math.abs(b.position.y) > props.boundsLimit ||
-          Math.abs(b.position.z) > props.boundsLimit
-        ) {
-          b.active = false;
-          _dummy.position.set(0, -999, 0);
-          _dummy.scale.set(0, 0, 0);
-          _dummy.updateMatrix();
-          mesh.setMatrixAt(i, _dummy.matrix);
-          continue;
-        }
-
-        activeCount++;
-
-        // Fade: scale down as life approaches 0
-        const fade = Math.min(b.life, 1.0);
-        _dummy.position.copy(b.position);
-        _dummy.scale.set(fade, fade, fade);
-        _dummy.updateMatrix();
-        mesh.setMatrixAt(i, _dummy.matrix);
-      }
-
-      // ---- Batch GPU buffer updates (ONCE after full loop, never per-bullet)
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-
-      // ---- Callback with active count ----
-      if (props.onBulletCount) {
-        props.onBulletCount(activeCount);
-      }
-    });
-
     // ---- JSX ---------------------------------------------------------------
+    // `children` is this component's material override and always has been, so
+    // it is routed to the field's `material` prop — which exists precisely so
+    // that `children` is free to carry emitters. The field's single
+    // `instancedMesh` stays the only scene node this subtree contributes:
+    // `<Emitter>` renders `null` and the registry provider is not a scene
+    // object.
     return (
-      <instancedMesh
-        ref={meshRef}
-        args={[undefined, undefined, maxBullets]}
-        frustumCulled={false}
+      <BulletField
+        ref={fieldRef}
+        maxBullets={maxBullets}
+        boundsLimit={boundsLimit}
+        bulletRadius={bulletRadius}
+        fadeTime={fadeTime}
+        fadeCurve={fadeCurve}
+        paused={paused}
+        reducedMotion={reducedMotion}
+        onBulletCount={onBulletCount}
+        material={children}
       >
-        <sphereGeometry args={[0.12, 6, 6]} />
-        {children ?? <meshBasicMaterial fog={false} />}
-      </instancedMesh>
+        <Emitter
+          ref={emitterRef}
+          pattern={pattern}
+          fireRate={fireRate}
+          origin={origin}
+          spawnCenterY={spawnCenterY}
+          rotationSpeed={rotationSpeed}
+        />
+      </BulletField>
     );
   },
 );

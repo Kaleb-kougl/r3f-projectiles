@@ -17,6 +17,8 @@ function assertSpawnDataShape(spawns: BulletSpawnData[]) {
     expect(typeof s.delay).toBe('number');
     expect(typeof s.life).toBe('number');
     expect(s.color === null || typeof s.color === 'number').toBe(true);
+    expect(typeof s.scale).toBe('number');
+    expect(Number.isNaN(s.scale)).toBe(false);
   }
 }
 
@@ -32,6 +34,7 @@ describe('gen', () => {
     { name: 'helix', fn: () => gen.helix(50) },
     { name: 'rose3D', fn: () => gen.rose3D(50) },
     { name: 'ring', fn: () => gen.ring(50) },
+    { name: 'arc', fn: () => gen.arc(50) },
   ])('$name', ({ fn }) => {
     let spawns: BulletSpawnData[];
 
@@ -90,6 +93,86 @@ describe('gen', () => {
     releaseSpawnData(spawns);
   });
 
+  // --- arc: the only directional generator -----------------------------------
+
+  /** Recover the heading of a spawn's velocity, in `ring`/`arc` angle convention. */
+  const headingOf = (s: BulletSpawnData) => Math.atan2(s.velocity.x, s.velocity.z);
+  /** Signed smallest angle from `a` to `b`. */
+  const angleDelta = (a: number, b: number) =>
+    Math.atan2(Math.sin(b - a), Math.cos(b - a));
+
+  it('arc centres a single bullet exactly on the heading', () => {
+    for (const heading of [0, 1, -2.5, Math.PI]) {
+      const spawns = gen.arc(1, Math.PI / 4, 2, heading);
+      expect(angleDelta(headingOf(spawns[0]), heading)).toBeCloseTo(0, 10);
+      releaseSpawnData(spawns);
+    }
+  });
+
+  it('arc spans the full cone, inclusive of both edges', () => {
+    const spread = Math.PI / 3;
+    const heading = 0.7;
+    const spawns = gen.arc(9, spread, 2, heading);
+    const first = angleDelta(heading, headingOf(spawns[0]));
+    const last = angleDelta(heading, headingOf(spawns[spawns.length - 1]));
+    expect(first).toBeCloseTo(-spread / 2, 10);
+    expect(last).toBeCloseTo(spread / 2, 10);
+    // and nothing escapes the cone
+    for (const s of spawns) {
+      expect(Math.abs(angleDelta(heading, headingOf(s)))).toBeLessThanOrEqual(spread / 2 + 1e-9);
+    }
+    releaseSpawnData(spawns);
+  });
+
+  it('arc is a strict superset of ring: spread 2π reproduces ring exactly', () => {
+    const count = 16;
+    const ring = gen.ring(count, 3, 5);
+    const arc = gen.arc(count, Math.PI * 2, 3, 0, 5);
+    expect(arc).toHaveLength(count);
+    for (let i = 0; i < count; i++) {
+      expect(arc[i].velocity.x).toBeCloseTo(ring[i].velocity.x, 10);
+      expect(arc[i].velocity.z).toBeCloseTo(ring[i].velocity.z, 10);
+      expect(arc[i].offset.x).toBeCloseTo(ring[i].offset.x, 10);
+      expect(arc[i].offset.z).toBeCloseTo(ring[i].offset.z, 10);
+    }
+    releaseSpawnData(ring);
+    releaseSpawnData(arc);
+  });
+
+  it('arc at full spread does not double a bullet where the ends meet', () => {
+    const spawns = gen.arc(8, Math.PI * 2, 1, 0);
+    const headings = spawns.map(headingOf).sort((a, b) => a - b);
+    for (let i = 1; i < headings.length; i++) {
+      expect(Math.abs(headings[i] - headings[i - 1])).toBeGreaterThan(1e-6);
+    }
+    releaseSpawnData(spawns);
+  });
+
+  it('arc rotates rigidly with heading', () => {
+    const a = gen.arc(5, Math.PI / 4, 2, 0);
+    const b = gen.arc(5, Math.PI / 4, 2, 1.1);
+    for (let i = 0; i < 5; i++) {
+      expect(angleDelta(headingOf(a[i]), headingOf(b[i]))).toBeCloseTo(1.1, 10);
+    }
+    releaseSpawnData(a);
+    releaseSpawnData(b);
+  });
+
+  it('arc applies speed as velocity magnitude', () => {
+    const spawns = gen.arc(6, Math.PI / 2, 7, 0.3);
+    for (const s of spawns) expect(s.velocity.length()).toBeCloseTo(7, 10);
+    releaseSpawnData(spawns);
+  });
+
+  it('arc stays flat on the XZ plane', () => {
+    const spawns = gen.arc(12, Math.PI / 3, 2, 2.2, 4);
+    for (const s of spawns) {
+      expect(s.offset.y).toBe(0);
+      expect(s.velocity.y).toBe(0);
+    }
+    releaseSpawnData(spawns);
+  });
+
   it('galaxy sets life to 8.0', () => {
     const spawns = gen.galaxy(20);
     for (const s of spawns) {
@@ -135,6 +218,41 @@ describe('mod', () => {
       for (const s of spawns) {
         expect(s.color).toBe(0x0000ff);
       }
+      releaseSpawnData(spawns);
+    });
+  });
+
+  describe('scale', () => {
+    it('sets scale on all spawns', () => {
+      const spawns = gen.ring(10);
+      mod.scale(2.5)(spawns);
+      for (const s of spawns) {
+        expect(s.scale).toBe(2.5);
+      }
+      releaseSpawnData(spawns);
+    });
+
+    it('overwrites existing scale', () => {
+      const spawns = gen.ring(5);
+      mod.scale(3)(spawns);
+      mod.scale(0.5)(spawns);
+      for (const s of spawns) {
+        expect(s.scale).toBe(0.5);
+      }
+      releaseSpawnData(spawns);
+    });
+
+    it('leaves spawns at the default scale of 1 when never applied', () => {
+      const spawns = gen.ring(5);
+      for (const s of spawns) {
+        expect(s.scale).toBe(1);
+      }
+      releaseSpawnData(spawns);
+    });
+
+    it('returns the same array reference (mutation, not copy)', () => {
+      const spawns = gen.ring(4);
+      expect(mod.scale(2)(spawns)).toBe(spawns);
       releaseSpawnData(spawns);
     });
   });
@@ -288,6 +406,26 @@ describe('compose', () => {
     expect(spawns).toHaveLength(20);
     for (const s of spawns) {
       expect(s.color).toBe(0x39ff14);
+      expect(s.acceleration.length()).toBeGreaterThan(0);
+    }
+    releaseSpawnData(spawns);
+  });
+
+  it('composes scale alongside other modifiers without interference', () => {
+    const spawns = compose(
+      gen.ring(10),
+      mod.color(0xff0000),
+      mod.scale(1.5),
+      mod.sequence(0.05),
+      mod.accelerate(2),
+    );
+
+    for (let i = 0; i < spawns.length; i++) {
+      const s = spawns[i];
+      expect(s.scale).toBe(1.5);
+      // The other slots are untouched by mod.scale.
+      expect(s.color).toBe(0xff0000);
+      expect(s.delay).toBeCloseTo(i * 0.05, 10);
       expect(s.acceleration.length()).toBeGreaterThan(0);
     }
     releaseSpawnData(spawns);

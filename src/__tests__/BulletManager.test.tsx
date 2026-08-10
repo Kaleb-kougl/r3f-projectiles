@@ -17,10 +17,10 @@ describe('BulletManager', () => {
   });
 
   it('provides imperative fire(), clear() and activeCount APIs', async () => {
-    let bulletRef: React.RefObject<BulletManagerHandle> | null = null;
+    let bulletRef!: React.RefObject<BulletManagerHandle | null>;
     
     const TestComponent = () => {
-      const ref = useRef<BulletManagerHandle>(null);
+      const ref = useRef<BulletManagerHandle | null>(null);
       bulletRef = ref;
       return <BulletManager ref={ref} maxBullets={500} paused={true} pattern="ring" />;
     };
@@ -47,10 +47,10 @@ describe('BulletManager', () => {
   });
 
   it('respects paused=true and reducedMotion=true props', async () => {
-    let bulletRef: React.RefObject<BulletManagerHandle> | null = null;
+    let bulletRef!: React.RefObject<BulletManagerHandle | null>;
     
     const TestComponent = ({ paused = false, reducedMotion = false }) => {
-      const ref = useRef<BulletManagerHandle>(null);
+      const ref = useRef<BulletManagerHandle | null>(null);
       bulletRef = ref;
       return (
         <BulletManager 
@@ -84,10 +84,10 @@ describe('BulletManager', () => {
   });
 
   it('handles negative/edge case props: fireRate=0, fireRate<0, boundsLimit<=0', async () => {
-    let bulletRef: React.RefObject<BulletManagerHandle> | null = null;
+    let bulletRef!: React.RefObject<BulletManagerHandle | null>;
     
     const TestComponent = ({ boundsLimit = 25, fireRate = 1.5, paused = false }) => {
-      const ref = useRef<BulletManagerHandle>(null);
+      const ref = useRef<BulletManagerHandle | null>(null);
       bulletRef = ref;
       return (
         <BulletManager 
@@ -132,10 +132,10 @@ describe('BulletManager', () => {
   });
 
   it('handles dynamic maxBullets re-allocation gracefully', async () => {
-    let bulletRef: React.RefObject<BulletManagerHandle> | null = null;
+    let bulletRef!: React.RefObject<BulletManagerHandle | null>;
     
     const TestComponent = ({ maxBullets }: { maxBullets: number }) => {
-      const ref = useRef<BulletManagerHandle>(null);
+      const ref = useRef<BulletManagerHandle | null>(null);
       bulletRef = ref;
       return <BulletManager ref={ref} maxBullets={maxBullets} paused={true} pattern="ring" />;
     };
@@ -170,6 +170,58 @@ describe('BulletManager', () => {
     
     expect(onBulletCount).toHaveBeenCalled();
     expect(typeof onBulletCount.mock.calls[0][0]).toBe('number');
+  });
+
+  it('fadeTime is visual only — it never changes bullet lifetime', async () => {
+    // The fade must not leak into the despawn test. Two identical sims that differ
+    // only in fadeTime must retire bullets on exactly the same frames.
+    const run = async (fadeTime: number) => {
+      let ref!: React.RefObject<BulletManagerHandle | null>;
+      const Comp = () => {
+        const r = useRef<BulletManagerHandle | null>(null);
+        ref = r;
+        return (
+          <BulletManager
+            ref={r}
+            maxBullets={500}
+            pattern="ring"
+            fireRate={10}
+            fadeTime={fadeTime}
+          />
+        );
+      };
+      const renderer = await ReactThreeTestRenderer.create(<Comp />);
+      const counts: number[] = [];
+      for (let i = 0; i < 12; i++) {
+        await renderer.advanceFrames(1, 0.1);
+        counts.push(ref!.current!.activeCount);
+      }
+      return counts;
+    };
+
+    const noFade = await run(0);
+    const longFade = await run(5);
+    expect(longFade).toEqual(noFade);
+    expect(noFade.some((c) => c > 0)).toBe(true); // the sim actually ran
+  });
+
+  it('accepts a custom fadeCurve function and throws on an unknown name', async () => {
+    const curve = vi.fn((p: number) => p);
+    // fadeTime must exceed the bullets' life (ring defaults to 5s) or fadeScale
+    // short-circuits before ever calling the curve — which is the intended fast path.
+    const renderer = await ReactThreeTestRenderer.create(
+      <BulletManager maxBullets={100} pattern="ring" fireRate={10} fadeTime={10} fadeCurve={curve} />
+    );
+    await renderer.advanceFrames(3, 0.1);
+    expect(curve).toHaveBeenCalled();
+
+    // An unknown name throws during RENDER, not inside useFrame.
+    await expect(
+      ReactThreeTestRenderer.create(
+        // @ts-expect-error — deliberately invalid at the type level
+        <BulletManager maxBullets={100} pattern="ring" fadeCurve="bogus" />
+      )
+    ).rejects.toThrow(/Unknown easing/);
   });
 
   it('supports custom child material overrides', async () => {

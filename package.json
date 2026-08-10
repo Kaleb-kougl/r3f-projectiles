@@ -1,7 +1,7 @@
 {
   "name": "@k9kbdev/r3f-projectiles",
-  "version": "0.3.8",
-  "description": "Composable, GPU-instanced projectile system for React Three Fiber. Zero-allocation render loop. 10,000+ simultaneous bullets at 120fps.",
+  "version": "0.4.0",
+  "description": "Composable, GPU-instanced projectile system for React Three Fiber. Render loop allocates nothing per frame or per bullet — only a per-burst pattern array and a per-flush GPU update range. 10,000+ simultaneous bullets at 120fps.",
   "license": "MIT",
   "author": "Kaleb Kougl",
   "repository": {
@@ -59,6 +59,7 @@
     "dev:stress": "vite examples/stress-test",
     "build:stress": "vite build examples/stress-test --base=/r3f-projectiles/",
     "test": "vitest run",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint src examples --ext .ts,.tsx",
     "prepublishOnly": "npm run build"
   },

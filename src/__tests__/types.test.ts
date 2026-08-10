@@ -11,7 +11,8 @@ describe('types', () => {
       'galaxy',
       'helix',
       'rose3D',
-      'ring'
+      'ring',
+      'arc'
     ];
 
     const actualKeys = Object.keys(PATTERN_LABELS);

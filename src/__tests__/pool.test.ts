@@ -30,8 +30,31 @@ describe('acquire', () => {
     expect(p.delay).toBe(0);
     expect(p.color).toBeNull();
     expect(p.life).toBe(5.0);
+    expect(p.payload).toBe(0);
+    expect(p.scale).toBe(1);
 
     releaseSpawnData([p]);
+  });
+
+  it('sets scale to 1 on the fresh-allocation branch', () => {
+    // Drain the free list, holding every reference so nothing is returned to it.
+    // The pool caps at 20_000, so this guarantees it is empty afterwards and the
+    // next acquire() must take the `new Vector3()` allocation branch.
+    const drained: BulletSpawnData[] = [];
+    const recycled = new Set<BulletSpawnData>();
+    for (let i = 0; i < 20_001; i++) {
+      const p = acquire();
+      drained.push(p);
+      recycled.add(p);
+    }
+
+    const fresh = acquire();
+    // Never seen before ⇒ it came from the allocation branch, not the free list.
+    expect(recycled.has(fresh)).toBe(false);
+    expect(fresh.scale).toBe(1);
+
+    drained.push(fresh);
+    releaseSpawnData(drained);
   });
 
   it('returns unique objects on successive calls (no aliasing)', () => {
@@ -57,6 +80,8 @@ describe('pool recycling', () => {
     first.delay = 42;
     first.color = 0xdeadbe;
     first.life = 999;
+    first.payload = 7;
+    first.scale = 3.5;
 
     releaseSpawnData([first]);
 
@@ -79,8 +104,25 @@ describe('pool recycling', () => {
     expect(second.delay).toBe(0);
     expect(second.color).toBeNull();
     expect(second.life).toBe(5.0);
+    expect(second.payload).toBe(0);
+    expect(second.scale).toBe(1);
 
     releaseSpawnData([second]);
+  });
+
+  it('does not leak scale across bursts (pooled-reuse branch resets it)', () => {
+    // Acquire a batch, scale it up, and release — the exact shape of a burst.
+    const burst = [acquire(), acquire(), acquire()];
+    for (const s of burst) s.scale = 4;
+    releaseSpawnData(burst);
+
+    // The next burst must draw recycled objects at the default scale, not 4.
+    const next = [acquire(), acquire(), acquire()];
+    // Confirm we really exercised the recycle branch, not fresh allocation.
+    expect(next.some((s) => burst.includes(s))).toBe(true);
+    for (const s of next) expect(s.scale).toBe(1);
+
+    releaseSpawnData(next);
   });
 
   it('handles releasing an empty array gracefully', () => {

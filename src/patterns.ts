@@ -204,6 +204,54 @@ export const gen = {
     }
     return spawns;
   },
+
+  /**
+   * Distributes bullets in a flat arc — the only **directional** generator.
+   *
+   * Angles follow the same convention as {@link gen.ring}: `0` points along `+Z`,
+   * increasing toward `+X`, so a direction is `(sin θ, 0, cos θ)` and a heading can be
+   * recovered from a direction with `Math.atan2(dir.x, dir.z)`.
+   *
+   * At `spread >= 2π` this reduces exactly to `ring(count, speed, radius)` — evenly
+   * spaced, with no doubled bullet where the ends meet — which makes `arc` a strict
+   * superset of `ring`. Below `2π` the bullets span the cone inclusive of both edges,
+   * so `count === 1` fires a single bullet straight down the heading.
+   *
+   * @param count   - Number of bullets in the arc.
+   * @param spread  - Angular width of the cone in radians. @default Math.PI / 4
+   * @param speed   - Outward velocity magnitude. @default 2
+   * @param heading - Direction the arc is centred on, in radians. @default 0
+   * @param radius  - Initial offset from the origin (0 = all start at centre). @default 0
+   */
+  arc(
+    count: number,
+    spread: number = Math.PI / 4,
+    speed: number = 2,
+    heading: number = 0,
+    radius: number = 0,
+  ): BulletSpawnData[] {
+    const spawns: BulletSpawnData[] = [];
+    const TAU = Math.PI * 2;
+    // A full circle must not place a bullet at both -π and +π: those are the same
+    // direction, and that duplicate is exactly what would stop this reducing to `ring`.
+    const full = spread >= TAU - 1e-9;
+
+    for (let i = 0; i < count; i++) {
+      let angle: number;
+      if (full) {
+        angle = heading + (i / count) * TAU;
+      } else if (count === 1) {
+        angle = heading;
+      } else {
+        angle = heading + (i / (count - 1) - 0.5) * spread;
+      }
+      const p = acquire();
+      p.offset.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+      p.velocity.set(Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(speed);
+      spawns.push(p);
+    }
+    return spawns;
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +274,34 @@ export const mod = {
   color(col: number): Modifier {
     return (spawns: BulletSpawnData[]) => {
       spawns.forEach((s) => (s.color = col));
+      return spawns;
+    };
+  },
+
+  /**
+   * Stamp an opaque per-bullet integer onto every bullet in the batch. The
+   * library carries it untouched; read it back via `forEachActive`. Use it for
+   * per-bullet damage, pierce counters, faction tags, etc.
+   *
+   * @param value - The payload integer to assign.
+   */
+  payload(value: number): Modifier {
+    return (spawns: BulletSpawnData[]) => {
+      spawns.forEach((s) => (s.payload = value));
+      return spawns;
+    };
+  },
+
+  /**
+   * Set a uniform size multiplier on every bullet in the batch. Multiplies
+   * against the field's `bulletRadius` rather than replacing it, so `1` is the
+   * field's configured size and `2` is double.
+   *
+   * @param n - The scale multiplier to assign.
+   */
+  scale(n: number): Modifier {
+    return (spawns: BulletSpawnData[]) => {
+      spawns.forEach((s) => (s.scale = n));
       return spawns;
     };
   },
