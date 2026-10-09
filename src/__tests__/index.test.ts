@@ -20,6 +20,9 @@ describe('Public API Barrel File (index.ts)', () => {
       'BUILTIN_PATTERNS',
       'resolvePattern',
 
+      // Payload bitfields (0.5.0)
+      'definePayload',
+
       // Easing (bullet fade-out)
       'EASING',
 

@@ -21,13 +21,13 @@ import type { BulletManagerProps, BulletManagerHandle } from './types';
  * exactly one `<Emitter>` into it — contributing an origin, a pattern, and a
  * cadence. At one emitter the split is invisible from the outside, which is
  * the point: every prop, default, and imperative method behaves exactly as it
- * always has. The wrapper's only real work is splitting the fourteen props
+ * always has. The wrapper's only real work is splitting the sixteen props
  * across the two components and routing `children` to the field's `material`.
  *
  * ## Where the defaults live
  * In `<BulletField>` and `<Emitter>`, not here. This component forwards every
  * prop exactly as it received it — `undefined` included — and `undefined` is
- * precisely what makes a destructuring default apply. So each of the fourteen
+ * precisely what makes a destructuring default apply. So each of the sixteen
  * documented defaults is written down once, in the component that consumes it,
  * and the wrapper cannot drift from the field because it does not restate
  * anything. (Through phase 3 it was the other way round: defaults here,
@@ -91,6 +91,8 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
       paused,
       reducedMotion,
       boundsLimit,
+      boundsCenter,
+      stepMode,
       spawnCenterY,
       rotationSpeed,
       origin,
@@ -138,6 +140,19 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
         forEachActive(cb) {
           fieldRef.current?.forEachActive(cb);
         },
+
+        /**
+         * Advance the simulation by exactly `dt` seconds. Manual mode only —
+         * the field's `step()`, forwarded; see `BulletFieldHandle.step`.
+         */
+        step(dt: number) {
+          fieldRef.current?.step(dt);
+        },
+
+        /** Overwrite a live bullet's payload; see `BulletFieldHandle.setPayload`. */
+        setPayload(index: number, payload: number) {
+          fieldRef.current?.setPayload(index, payload);
+        },
       }),
       [],
     );
@@ -154,6 +169,8 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
         ref={fieldRef}
         maxBullets={maxBullets}
         boundsLimit={boundsLimit}
+        boundsCenter={boundsCenter}
+        stepMode={stepMode}
         bulletRadius={bulletRadius}
         fadeTime={fadeTime}
         fadeCurve={fadeCurve}

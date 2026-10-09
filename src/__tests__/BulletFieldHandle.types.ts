@@ -57,10 +57,14 @@ type Exact<A, B> =
     : false;
 
 // ---------------------------------------------------------------------------
-// The seven consumer members — and ONLY those seven
+// The nine consumer members — and ONLY those nine
 // ---------------------------------------------------------------------------
 
-/** The consumer surface, spelled out so the assertion below can be exact. */
+/**
+ * The consumer surface, spelled out so the assertion below can be exact.
+ * 0.5.0 added the last two: `step` (manual stepping) and `setPayload` (the
+ * write-back half of `forEachActive`). Neither names an internal type.
+ */
 export type ConsumerSurface =
   | 'fireAt'
   | 'clear'
@@ -68,7 +72,9 @@ export type ConsumerSurface =
   | 'releaseEmitter'
   | 'activeCountFor'
   | 'activeCount'
-  | 'forEachActive';
+  | 'forEachActive'
+  | 'step'
+  | 'setPayload';
 
 /**
  * Both directions at once: nothing consumer-facing has been dropped, and

@@ -16,6 +16,11 @@ export { Emitter } from './Emitter';
 export { gen, mod, compose } from './patterns';
 export { BUILTIN_PATTERNS, resolvePattern } from './presets';
 
+// Payload bitfields — several small fields in the one per-bullet integer.
+// Also on the React-free `/patterns` entry.
+export { definePayload } from './payload';
+export type { PayloadLayout, PayloadSchema, PayloadValues } from './payload';
+
 // Easing (bullet fade-out)
 export { EASING } from './easing';
 export type { EasingFn, EasingName } from './easing';
@@ -47,6 +52,7 @@ export type {
   EmitterProps,
   PoolExhaustionReason,
 } from './BulletField';
+export type { StepMode } from './stepping';
 export type { EmitterHandle } from './Emitter';
 
 // Utilities

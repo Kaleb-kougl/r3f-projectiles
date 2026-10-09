@@ -1,6 +1,7 @@
 import {
   useRef,
   useMemo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   createContext,
@@ -18,6 +19,13 @@ import {
 import { resolvePattern } from './presets';
 import { resolveEasing, fadeScale } from './easing';
 import { releaseSpawnData } from './pool';
+import {
+  createStepState,
+  foldPendingRange,
+  resetPending,
+  shouldStep,
+  type StepMode,
+} from './stepping';
 import type {
   BulletSpawnData,
   EasingFn,
@@ -165,7 +173,7 @@ interface BulletState {
 
 /**
  * Props for the public `<Emitter>` component — the five of `<BulletManager>`'s
- * fourteen that describe an emitter rather than the field.
+ * sixteen that describe an emitter rather than the field.
  *
  * All optional, and the defaults are applied by `<Emitter>` itself. They are
  * the same values `<BulletManager>` has always documented, and they now live in
@@ -376,6 +384,58 @@ export interface BulletFieldHandle {
       emitterId: number,
     ) => boolean | void,
   ) => void;
+  /**
+   * Advance the simulation by exactly `dt` seconds. **Manual mode only** —
+   * see {@link BulletFieldProps.stepMode}.
+   *
+   * One call is one step of everything the frame loop does in `'auto'` mode:
+   * every emitter's cadence timer and auto-fire (at most one shot per emitter
+   * per step, as per frame in auto mode), orbit phase, spawn delays,
+   * acceleration and motion, life and expiry, bounds culling, the fade, and the
+   * reduced-motion snapshot. Call it as many times per rendered frame as your
+   * fixed-timestep loop needs. `dt` is used as given — the `0.1` s clamp the
+   * auto loop applies to a frame's `delta` does not apply here, because the
+   * caller owns the clock.
+   *
+   * **Upload is per frame, not per step.** A step writes instance matrices on
+   * the CPU but never flags them for upload; the field's frame loop uploads
+   * the union of everything written since the previous frame exactly once. Five
+   * steps between two frames cost one upload. Call `step()` *before* the
+   * field's frame callback runs — from a `useFrame` with a negative priority,
+   * or from outside R3F's loop entirely — or the steps land in the following
+   * frame's upload instead.
+   *
+   * Allocates nothing per bullet. The only allocations are the per-burst ones
+   * any spawn makes (the pattern's array), on steps where an emitter fires.
+   *
+   * **Determinism.** Given the same sequence of `step(dt)` calls,
+   * `fire()` / `fireAt()` calls and `forEachActive` consumptions — and
+   * deterministic patterns and origins — two fields produce bit-identical
+   * bullet positions, however the steps were grouped into rendered frames.
+   * Rendering never feeds back into the simulation. See the README's
+   * "Deterministic stepping" section for the floating-point caveats.
+   *
+   * **A no-op** when the field is in `'auto'` mode (with a one-time warning in
+   * development builds — the field already steps itself), while `paused` (the
+   * step is dropped, not queued), before the field has mounted, and for any
+   * `dt` that is not a finite number greater than `0` (`NaN`, negative and
+   * infinite values also warn once in development). Never throws.
+   */
+  step(dt: number): void;
+  /**
+   * Overwrite the payload of the live bullet at slot `index` — the write-back
+   * half of {@link forEachActive}, for per-bullet state that changes in flight,
+   * such as a pierce counter decremented on each hit.
+   *
+   * Pass the `index` a `forEachActive` callback was handed, during that same
+   * walk; it is safe to call from inside the callback and changes nothing
+   * about the walk. A slot that is not live — consumed, expired, or never
+   * used — is ignored. An index means "this bullet" only until the bullet
+   * dies: once its slot is reused by a later spawn, the same index names the
+   * new bullet, so do not hold indices across steps. Allocates nothing;
+   * touches no GPU state.
+   */
+  setPayload(index: number, payload: number): void;
 }
 
 /**
@@ -453,7 +513,22 @@ export const EmitterRegistryContext =
 export interface BulletFieldProps {
   /** Maximum number of concurrent bullet instances. @default 2000 */
   maxBullets?: number;
-  /** Distance from origin at which bullets are deactivated. @default 25 */
+  /**
+   * Half-extent of the cull box. A bullet is deactivated on the step it ends
+   * with **any one** coordinate more than `boundsLimit` from the box's centre
+   * — so the region is an axis-aligned **cube** of side `2 × boundsLimit`, not
+   * a sphere, and the test is per axis (`|x − cx| > limit`, likewise `y`, `z`).
+   *
+   * Measured in the field's **local** coordinates — the space bullet positions
+   * live in, and the same space `origin` / `fireAt` positions are read in. With
+   * the field mounted untransformed at the scene root that is world space; under
+   * a transformed parent it is that parent's space. The centre is the local
+   * origin `(0, 0, 0)` unless {@link boundsCenter} moves it.
+   *
+   * `Infinity` disables bounds culling entirely (lifetime still despawns), for
+   * games that cull against their own walls. `0` is **not** special: it culls
+   * every bullet not exactly on the centre. @default 25
+   */
   boundsLimit?: number;
   /** Radius of each bullet sphere. @default 0.12 */
   bulletRadius?: number;
@@ -465,7 +540,38 @@ export interface BulletFieldProps {
   paused?: boolean;
   /** Spawn one static, zero-velocity snapshot per emitter, then freeze. @default false */
   reducedMotion?: boolean;
-  /** Called once per frame with the current number of active bullets. */
+  /**
+   * Centre of the {@link boundsLimit} cull box, read fresh from `.current` once
+   * per step — so the box can follow a moving player or camera instead of
+   * sitting on the field's origin. In the field's local coordinates, like
+   * bullet positions. Omitted, or `.current` `null`: the box is centred on
+   * `(0, 0, 0)`, exactly as before 0.5.0.
+   */
+  boundsCenter?: { readonly current: Vector3 | null };
+  /**
+   * Who advances the simulation. See {@link StepMode}.
+   *
+   * `'auto'` (the default) is the loop this field has always run: one step per
+   * rendered frame, by the frame's `delta` clamped to `0.1` s.
+   *
+   * `'manual'` hands the clock to you, for a fixed-timestep or deterministic
+   * game: the field's `useFrame` stops advancing **anything** — cadence
+   * timers, auto-fire, orbit phase, spawn delays, motion, life, bounds culling,
+   * the fade, the reduced-motion snapshot — and
+   * {@link BulletFieldHandle.step | `step(dt)`} does it instead, as often as
+   * you call it. The frame loop keeps exactly one job: uploading what the
+   * steps wrote, once per rendered frame. `fire()` and `fireAt()` behave
+   * identically in both modes. `onBulletCount` is raised once per rendered
+   * frame in which at least one step ran.
+   *
+   * May be switched at runtime; nothing is reset by the switch. @default 'auto'
+   */
+  stepMode?: StepMode;
+  /**
+   * Called once per frame with the current number of active bullets. Under
+   * `stepMode="manual"`, only on frames in which `step()` advanced the
+   * simulation at least once.
+   */
   onBulletCount?: (count: number) => void;
   /**
    * Called when a burst could not be spawned in full because the shared pool
@@ -590,9 +696,17 @@ export interface BulletFieldProps {
  *     frame that spawns pays this, and a consumer-supplied `PatternFactory`
  *     pays whatever it does instead.
  * - **Frame-rate independent**: physics uses `addScaledVector(v, dt)` with
- *   `dt` clamped to `Math.min(delta, 0.1)`.
- * - **Batched GPU writes**: `needsUpdate` is set once after the full loop,
- *   never per bullet, and always through {@link markMatrixDirty}.
+ *   `dt` clamped to `Math.min(delta, 0.1)` — in `'auto'` mode. Under
+ *   `stepMode="manual"` each `step(dt)` advances exactly the `dt` given.
+ * - **Batched GPU writes**: `needsUpdate` is set once per rendered frame,
+ *   never per bullet and never per step, and always through
+ *   {@link markMatrixDirty}.
+ *
+ * ## Manual stepping
+ * `stepMode="manual"` moves the simulation off the render clock: the frame
+ * loop only uploads, and `step(dt)` on the handle advances the simulation —
+ * any number of times per frame, for a fixed-timestep or deterministic game.
+ * See {@link BulletFieldProps.stepMode} and {@link BulletFieldHandle.step}.
  * - **DynamicDrawUsage**: GPU buffer hint applied on mount.
  * - **Pool init at (0, −999, 0)**: prevents first-frame flash.
  */
@@ -610,6 +724,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       fadeCurve = 'linear',
       paused = false,
       reducedMotion = false,
+      boundsCenter,
+      stepMode = 'auto',
       onBulletCount,
       onPoolExhausted,
       material,
@@ -673,6 +789,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       paused,
       reducedMotion,
       boundsLimit,
+      boundsCenter,
+      stepMode,
       fadeTime,
       // Resolved at RENDER time, not per frame: an unknown easing name then throws
       // once, during render, with a stack pointing at the JSX — instead of sixty
@@ -686,6 +804,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       paused,
       reducedMotion,
       boundsLimit,
+      boundsCenter,
+      stepMode,
       fadeTime,
       fadeCurveFn: resolveEasing(fadeCurve),
       onBulletCount,
@@ -704,6 +824,23 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       }),
       [],
     );
+
+    // ---- Step state: what steps wrote since the last upload ----------------
+    //
+    // Simulation steps fold their dirty slot span in here instead of flagging
+    // the upload themselves; the frame loop flushes it once per rendered frame.
+    // Created once, mutated in place. See `StepState` in ./stepping.
+    const _step = useMemo(createStepState, []);
+
+    /**
+     * The simulation step, reached by the handle's `step()`. A ref because the
+     * handle is built before the step function is (the step lives where the
+     * frame loop's body always has, further down); both are created once, so
+     * this is assigned once in practice and never read stale.
+     */
+    const advanceRef = useRef<
+      ((mesh: InstancedMeshType, dt: number) => void) | null
+    >(null);
 
     // ---- Sparse-set operations (stable identity, close over the refs) ------
     const { acquireSlot, releaseSlot, syncMeshCount } = useMemo(
@@ -803,6 +940,9 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         mesh.setColorAt(i, _tempColor.set(0x000000));
       }
       mesh.instanceMatrix.clearUpdateRanges?.();
+      // Manual steps taken since the last frame described the OLD pool's slots
+      // (possibly beyond the new capacity); the full upload below covers this one.
+      resetPending(_step);
       markMatrixDirty(mesh, 0, maxBullets - 1);
       mesh.instanceColor!.needsUpdate = true;
 
@@ -1263,23 +1403,58 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
             markMatrixDirty(mesh, minSlot, maxSlot);
           }
         },
+
+        /**
+         * Advance exactly `dt` seconds — manual mode only. Every refusal
+         * (auto mode, paused, unusable `dt`) is a no-op decided by
+         * `shouldStep`, never a throw. Uploads nothing itself: the step folds
+         * its writes into `_step` and the frame loop flushes once per frame.
+         */
+        step(dt: number) {
+          const props = propsRef.current;
+          if (!shouldStep(_step, props.stepMode, props.paused, dt)) return;
+          const mesh = meshRef.current;
+          const advance = advanceRef.current;
+          if (!mesh || !advance) return;
+          advance(mesh, dt);
+        },
+
+        /**
+         * Overwrite a live bullet's payload. `slotToDense` is `-1` for a free
+         * slot and `undefined` for an index outside the pool (or not an
+         * integer), so one negated comparison rejects all of them.
+         */
+        setPayload(index: number, payload: number) {
+          if (!(slotToDenseRef.current[index] >= 0)) return;
+          bulletsRef.current[index].payload = payload;
+        },
       }),
-      [_dummy, _sourcePos, _spawnRange, spawnBullets, releaseSlot, syncMeshCount],
+      [_dummy, _sourcePos, _spawnRange, _step, spawnBullets, releaseSlot, syncMeshCount],
     );
 
     useImperativeHandle(ref, () => handle, [handle]);
 
-    // ---- Frame loop --------------------------------------------------------
-    useFrame((_state, delta) => {
-      const mesh = meshRef.current;
-      if (!mesh) return;
-
+    // ---- Simulation step ---------------------------------------------------
+    //
+    // One step of `dt` seconds: everything the frame loop did per frame before
+    // 0.5.0, minus the GPU flush and `onBulletCount`. The body is that loop's,
+    // in place — so "this frame" in the comments below means "this step", which
+    // in `'auto'` mode is the same thing.
+    //
+    // Called once per frame by the frame loop in `'auto'` mode, and by the
+    // handle's `step(dt)` in `'manual'` mode; `paused` and the `dt` clamp are
+    // the callers' business. It writes instance matrices on the CPU (that is
+    // the simulation's visible output, and it keeps the fade on simulation
+    // time) but never flags them for upload: the slot span it wrote is folded
+    // into `_step`, and the frame loop below uploads the union once per
+    // rendered frame however many steps ran.
+    //
+    // Nothing in here reads the renderer, the clock or the frame — only the
+    // pool, the registry, the props and `dt`. That is the whole of the
+    // determinism guarantee: identical step/fire/consume sequences produce
+    // identical state, whatever the frame grouping.
+    const advance = useCallback((mesh: InstancedMeshType, dt: number): void => {
       const props = propsRef.current;
-
-      // Respect paused prop
-      if (props.paused) return;
-
-      const dt = Math.min(delta, 0.1); // clamp to prevent spiral-of-death
       const bullets = bulletsRef.current;
       const entries = entriesRef.current;
 
@@ -1364,10 +1539,9 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         }
 
         if (serviced) {
-          // Flush the one-time update
-          syncMeshCount(mesh);
-          markMatrixDirty(mesh, rmMin, rmMax);
-          if (rmSpawned > 0 && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+          // Queue the one-time update; the frame loop's flush uploads it.
+          foldPendingRange(_step, rmMin, rmMax);
+          if (rmSpawned > 0) _step.colors = true;
         }
         return; // no animation under reduced motion
       }
@@ -1449,6 +1623,18 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       const fadeCurveFn = props.fadeCurveFn; // already resolved at render time
       const fadeSeconds = props.fadeTime;
 
+      // Bounds: a per-axis test against a cube of half-extent `boundsLimit` in
+      // the field's local space, centred on `boundsCenter` — read ONCE per step
+      // — or on the origin. With no centre the subtraction is `x - 0`, which is
+      // exactly `x` in IEEE arithmetic, so the default path is bit-identical
+      // to the pre-0.5.0 `Math.abs(x) > limit`. `Infinity` skips the test.
+      const limit = props.boundsLimit;
+      const cullBounds = limit !== Infinity;
+      const center = props.boundsCenter?.current;
+      const cx = center ? center.x : 0;
+      const cy = center ? center.y : 0;
+      const cz = center ? center.z : 0;
+
       // O(active), not O(maxBullets). BACKWARDS, because the despawn branch
       // below swap-removes from `dense` mid-walk.
       const dense = denseRef.current;
@@ -1474,9 +1660,10 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         // Deactivate: lifetime expired or out of bounds
         if (
           b.life <= 0 ||
-          Math.abs(b.position.x) > props.boundsLimit ||
-          Math.abs(b.position.y) > props.boundsLimit ||
-          Math.abs(b.position.z) > props.boundsLimit
+          (cullBounds &&
+            (Math.abs(b.position.x - cx) > limit ||
+              Math.abs(b.position.y - cy) > limit ||
+              Math.abs(b.position.z - cz) > limit))
         ) {
           // ---- Release sites 1 (lifetime expiry) and 2 (out of bounds) ----
           _dummy.position.set(0, -999, 0);
@@ -1518,17 +1705,49 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         }
       }
 
-      // ---- Batch GPU buffer updates (ONCE after full loop, never per-bullet)
-      syncMeshCount(mesh);
-      markMatrixDirty(mesh, minSlot, maxSlot);
+      // ---- Queue GPU buffer updates (ONCE after full loop, never per-bullet)
+      // Folded, not flushed: the frame loop uploads the union of every step
+      // since the last frame in one range.
+      foldPendingRange(_step, minSlot, maxSlot);
       // `instanceColor` is written ONLY at spawn, never in this loop, so a
-      // frame that spawned nothing has nothing to upload.
-      if (spawnedThisFrame > 0 && mesh.instanceColor) {
-        mesh.instanceColor.needsUpdate = true;
+      // step that spawned nothing has nothing to upload.
+      if (spawnedThisFrame > 0) _step.colors = true;
+      _step.stepped = true;
+    }, [_dummy, _sourcePos, _spawnRange, _step, spawnBullets, releaseSlot]);
+    advanceRef.current = advance;
+
+    // ---- Frame loop --------------------------------------------------------
+    //
+    // `'auto'`: one clamped step, then the flush — the pre-0.5.0 frame, split
+    // in two. `'manual'`: the flush alone; `step(dt)` did the simulating.
+    //
+    // The flush is unconditional and cheap when idle: `syncMeshCount` is
+    // idempotent (every path that moves the sparse set already ends in it),
+    // an empty range marks nothing, and colors upload only if a step spawned.
+    useFrame((_state, delta) => {
+      const mesh = meshRef.current;
+      if (!mesh) return;
+
+      const props = propsRef.current;
+
+      // Respect paused prop; manual mode never steps from here.
+      if (props.stepMode !== 'manual' && !props.paused) {
+        advance(mesh, Math.min(delta, 0.1)); // clamp to prevent spiral-of-death
       }
 
+      // ---- Batch GPU buffer updates (ONCE per rendered frame, never per step)
+      syncMeshCount(mesh);
+      markMatrixDirty(mesh, _step.min, _step.max);
+      if (_step.colors && mesh.instanceColor) {
+        mesh.instanceColor.needsUpdate = true;
+      }
+      const stepped = _step.stepped;
+      resetPending(_step);
+
       // ---- Callback with active count ----
-      if (props.onBulletCount) {
+      // Only on a frame that animated: never while paused, never for a
+      // reduced-motion snapshot, never on a manual frame with no step.
+      if (stepped && props.onBulletCount) {
         // Every survivor is still in `dense`; every despawn left it.
         props.onBulletCount(denseCountRef.current);
       }

@@ -6,6 +6,82 @@ were published without tags, so the packaged tarballs are the only record of tho
 
 ---
 
+## Unreleased (0.5.0)
+
+Simulation-side features for fixed-timestep and deterministic games: manual stepping, bounds
+options, and payload bitfields. Additive and backwards compatible — with every new prop at its
+default, the frame loop's observable behaviour is unchanged, and all 203 pre-existing tests pass
+unmodified apart from the two export-surface lists that exist to be updated (below).
+
+### Added
+
+- **`stepMode?: 'auto' | 'manual'`** on `<BulletField>` and `<BulletManager>`, default
+  `'auto'` (today's loop). Under `'manual'` the field's `useFrame` advances nothing — cadence
+  timers, emitter auto-fire, orbit phase, spawn delays, motion, life, bounds culling, the fade,
+  the reduced-motion snapshot — and **`step(dt)`** on the handle advances exactly `dt` seconds
+  of all of it, any number of times per rendered frame. `dt` is not clamped.
+
+  The GPU upload stays **once per rendered frame**: a step writes instance matrices on the CPU
+  but never flags them, and the frame callback uploads the union of everything written since
+  the previous frame in one `needsUpdate` and one `addUpdateRange` record. Five steps cost one
+  upload. Call `step()` before the field's frame callback runs (a negative-priority `useFrame`
+  or outside R3F's loop); a later step is uploaded on the following frame.
+
+  **Deterministic**: the same sequence of `step(dt)`, `fire()` / `fireAt()`, `forEachActive`
+  consumption and `setPayload` calls produces bit-identical positions, slots and payloads
+  however the steps are grouped into frames. Within one JS engine on one platform — the `Math`
+  trig functions are implementation-approximated and differ across engines — and only with
+  deterministic patterns: `gen.galaxy` and `gen.rose3D` use `Math.random()`. See the README's
+  "Deterministic stepping".
+
+  `step()` is a no-op in `'auto'` mode (one development warning per field), while `paused`
+  (dropped, not queued), before mount, and for a `dt` that is not a finite number `> 0`
+  (`NaN`, negative and infinite values warn once in development). It never throws.
+  `onBulletCount` is raised once per rendered frame in which at least one step ran.
+- **`boundsCenter?: { current: Vector3 | null }`** on `<BulletField>` and `<BulletManager>` —
+  centres the bounds cull box on a moving point (player, camera), re-read once per step.
+  Omitted or `null`: the field's origin, as before.
+- **`boundsLimit={Infinity}` is now a documented way to disable bounds culling** (it always
+  worked: no finite coordinate exceeds `Infinity`). It also skips the per-bullet test. `0` is
+  deliberately not given a special meaning.
+- **`definePayload(schema)`** — named bitfields over the per-bullet payload integer:
+  `pack(values)`, `get(payload, field)`, `with(payload, field, value)`, `max(field)`, `bits`,
+  `fields`. Declaration order, lowest bits first; at most 31 bits, so every payload is a
+  non-negative integer. Bad schemas throw a `RangeError` at definition time. Out-of-range
+  values and unknown field names throw in development builds; production skips the checks
+  and masks each value to its field's width, so an overflow can never bleed into a
+  neighbouring field. Exported from the package root and the React-free `/patterns` entry,
+  with types `PayloadLayout`, `PayloadSchema`, `PayloadValues`.
+- **`setPayload(index, payload)`** on `BulletFieldHandle` and `BulletManagerHandle` — the
+  write-back half of `forEachActive`, without which a payload "pierce counter" could not
+  actually count — `with()` returns a new integer and would otherwise have nowhere to put it.
+  Ignored for a slot that is not live.
+- **`step(dt)`** on `BulletManagerHandle`, forwarding to the field.
+- **Type** `StepMode`.
+
+### Changed
+
+- **Documentation only: `boundsLimit` was described as a "distance from origin".** It is, and
+  always has been, the half-extent of an axis-aligned **cube** — a bullet is culled when any
+  one coordinate is more than `boundsLimit` from the centre — measured in the field's
+  **local** coordinates. Behaviour is unchanged; the props tables and JSDoc now say so.
+- `BulletFieldHandle` is now nine members (`step`, `setPayload` added), and
+  `BulletManagerHandle` gains the same two. Additive for callers; code that *implements*
+  either interface itself (a hand-rolled mock, say) must add them. The type-level test and the
+  barrel's exact-export list were updated accordingly.
+
+### Internal
+
+- The frame loop's body moved, in place, into a `useCallback` step function that both the
+  auto frame loop and `step()` call. It folds its dirty slot span into a per-field pending
+  range instead of flagging the upload itself; the frame callback flushes once per frame. In
+  `'auto'` mode that is one fold and one flush per frame — the same GPU writes as before.
+- The `paused` frame now also runs the (empty) flush: `syncMeshCount` is idempotent and an
+  empty range marks nothing, so nothing observable changes.
+- New internal modules `src/stepping.ts` and `src/dev.ts`, and `src/payload.ts`.
+
+---
+
 ## 0.4.0 — 2026-08-09
 
 The N-emitter form: **`<BulletField>` + `<Emitter>`**. One mesh, one pool, and one frame

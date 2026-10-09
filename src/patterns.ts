@@ -2,6 +2,13 @@ import { Vector3, Quaternion } from 'three';
 import { acquire } from './pool';
 import type { BulletSpawnData, Modifier } from './types';
 
+// Payload bitfields ride along on this entry because they are pattern-side
+// data with no React in them: `mod.payload(Shot.pack({ … }))` is written next
+// to `gen` and `mod`. `./payload` imports nothing but a NODE_ENV check, so the
+// entry stays React- and R3F-free.
+export { definePayload } from './payload';
+export type { PayloadLayout, PayloadSchema, PayloadValues } from './payload';
+
 // ---------------------------------------------------------------------------
 // Module-scope scratch objects — allocated ONCE, never inside a hot path.
 // ---------------------------------------------------------------------------
