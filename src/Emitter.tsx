@@ -96,6 +96,10 @@ export const Emitter = forwardRef<EmitterHandle, EmitterProps>(
     if (!registry) {
       throw new Error('<Emitter> must be rendered as a child of <BulletField>.');
     }
+    // …and not of one that renders an external simulation, which nothing in
+    // the field steps — so a cadence there would never be serviced. Also a
+    // render-time throw, for the same reason.
+    registry.assertCanHostEmitters();
 
     // ---- The registry entry ------------------------------------------------
     //

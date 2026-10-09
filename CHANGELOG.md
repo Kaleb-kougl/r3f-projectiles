@@ -6,6 +6,125 @@ were published without tags, so the packaged tarballs are the only record of tho
 
 ---
 
+## Unreleased (0.6.0)
+
+### Headless simulation core; `<BulletField>` renders external simulations
+
+For games whose gameplay runs on a fixed, deterministic tick that must also run where React
+does not — a replay check re-running recorded input in a plain function, a co-op peer, a
+server, a test. The bullet simulation now lives in a React-free core, and `<BulletField>` is
+built on it: there is one implementation, not a component and a port. Additive and backwards
+compatible — all 338 pre-existing tests pass unmodified apart from the barrel's exact-export
+list, which exists to be updated (below).
+
+#### Added
+
+- **`createBulletSimulation(options?)`** → **`BulletSimulation`**, from the package root and
+  the new **`@k9kbdev/r3f-projectiles/core`** entry. The slot pool and sparse set, spawning
+  (offset, delay, life, payload, scale, color), semi-implicit Euler motion with acceleration,
+  expiry, bounds culling, the emitter-id counter, `forEachActive` consumption and fade
+  bookkeeping — with no React, no renderer, no DOM. API: `step(dt)`, `fireAt(origin,
+  pattern, emitterId?)` (returns the spawned count), `acquireEmitter()` / `releaseEmitter(id)`,
+  `clear(emitterId?)` (returns the freed count), `activeCount`, `activeCountFor(id)`,
+  `forEachActive(cb)`, `setPayload(i, payload)`, `stepCount`; mutable `boundsLimit`,
+  `boundsCenter` (a `{ current }` ref, a getter, or a live vector), `fadeTime`, `fadeCurve`,
+  `onPoolExhausted`; per-slot read access for renderers (`positionAt`, `velocityAt`,
+  `previousPositionAt`, `lifeAt`, `delayAt`, `payloadAt`, `emitterIdAt`, `scaleAt`, `fadeAt`,
+  `colorAt`, `isLive`, `isVisible`, `highWater`) and render-sync bookkeeping (`dirtyMin` /
+  `dirtyMax`, `spawnedSinceSync(i)`, `markSynced()`). Options: `maxBullets` (fixed),
+  `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `interpolation`, `onPoolExhausted`.
+  Allocates nothing per step or per bullet; a sinkless step is motion, life and culling only.
+- **State hashing**: `writeStateHash(out)` appends `index, x, y, z, vx, vy, vz, life,
+  payload, emitterId` per live bullet in ascending slot order, for a game's own state hash;
+  `hashState()` is a 32-bit FNV-style hash over the exact IEEE-754 bits of the same values
+  (endianness fixed, so it agrees across machines), allocation-free.
+- **`<BulletField simulation={sim}>`** — render a simulation you own. The field never steps,
+  spawns or culls it; once per rendered frame it syncs the simulation's dirty slot range
+  through the 0.5.0 `InstanceWriter` (so `geometry`, `orient`, `outline`, `material`,
+  `bulletRadius` all apply) and uploads once. The handle forwards every member to the
+  simulation except `step()`, a no-op with one development warning. Simulation props
+  (`maxBullets`, `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `paused`,
+  `reducedMotion`, `stepMode`, `onPoolExhausted`) are ignored, with one development warning
+  naming any passed. **`<Emitter>` inside such a field throws during render.** `onBulletCount`
+  is raised once per frame in which the simulation stepped.
+- **`interpolate?: () => number`** on `<BulletField>` — with `simulation` created with
+  `interpolation: true`, draws each bullet at `previous + (current − previous) × alpha`.
+  Position only; rewrites every slot up to the high-water mark per frame; zero allocation.
+  Ignored, with a development warning, without `simulation` or without `interpolation`.
+- **`createSeededRandom(seed)`** — mulberry32, pure 32-bit integer arithmetic, so its stream
+  is bit-identical on every engine. From the root, `/patterns` and `/core`.
+- **`gen.galaxy(…, rng?)`** and **`gen.rose3D(…, rng?)`** take an optional last argument,
+  `rng: () => number`, default `Math.random` (unchanged behaviour, still two draws per
+  bullet). Pass a seeded generator and both replay exactly. The `'galaxy'` and `'rose3D'`
+  presets stay random.
+- **Types** `BulletSimulation`, `BulletSimulationOptions`, `BoundsCenterSource`,
+  `ForEachActiveCallback`, `PoolExhaustedCallback`, `Vector3Like` (root and `/core`);
+  `PoolExhaustionReason` is now also on `/core`.
+
+#### Decisions
+
+- **Emitters stay in React.** `<Emitter>` cadence, the orbit and the reduced-motion snapshot
+  remain `<BulletField>`'s; the core spawns only through `fireAt`. A fixed-tick game owns
+  cadence as gameplay state, and a library-owned timer would be one more thing to serialize.
+- **An owned field writes matrices inline, an external one is pulled.** The owned field
+  attaches an internal render sink to its core, called at exactly the points 0.5.0 wrote
+  matrices — so its GPU writes (slots, order, values, writes per step, update ranges,
+  versions) are unchanged; this was checked byte-for-byte against 0.5.0 on a scripted trace,
+  as well as by the existing suites. An external simulation has no sink and pays for no
+  matrix work per step; its renderer syncs once per frame instead.
+
+#### Changed
+
+- Internal: `<BulletField>` holds no simulation state of its own. Its pool, sparse set,
+  spawn, step body, `clear`, `forEachActive`, `setPayload` and id counter are the core's;
+  the field keeps the emitter registry, cadences, reduced motion, `paused` / `stepMode`, the
+  per-frame flush and the handle. `PoolExhaustionReason` is defined beside the core and
+  re-exported from `BulletField` unchanged.
+- Internal: the React-free pattern types (`BulletSpawnData`, `PatternKey`, `PatternFactory`,
+  `Modifier`) moved from `src/types.ts` to `src/patternTypes.ts`, which `src/types.ts`
+  re-exports. The `/patterns` and `/core` declaration chunks therefore no longer reference
+  the global `React` namespace (they previously shared one with `BulletManagerProps`), so a
+  headless consumer type-checks without `@types/react`.
+- The barrel's exact-export list gains `createBulletSimulation` and `createSeededRandom`.
+
+#### Performance
+
+Measured with a throwaway harness run against both builds: each case is the fastest of 300
+rounds, each build was run five times alternately, and the table shows the median of those
+five (jsdom + `@react-three/test-renderer`, so frame figures include the test renderer's own
+overhead):
+
+| Case | 0.5.0 | 0.6.0 |
+|---|---|---|
+| Auto frame, 2,000 moving bullets, `orient="none"` | 0.080 ms | 0.086 ms |
+| Auto frame, 2,000 moving bullets, `orient="velocity"` | 0.142 ms | 0.152 ms |
+| Five manual `step()`s, 2,000 bullets | 0.41 ms | 0.47 ms |
+| `forEachActive` over 2,000 (no consumption) | 0.0040 ms | 0.0046 ms |
+| 100-bullet `fireAt` + `clear` into a near-full 32,000 pool | 0.160 ms | 0.106 ms |
+
+Read honestly: the owned field's step and frame paths measure 6–13 % slower, `forEachActive`
+~0.6 µs slower per 2,000 bullets, and bursts ~34 % faster. The step-path gap is not
+clearly structural — run in one process, the 0.5.0 loop and the core's loop traded places
+depending on which the JIT saw first (0.070 vs 0.082 ms in one order, 0.087 vs 0.084 ms in the
+other) — but it is reported as measured rather than rounded to "parity". A headless step with
+no renderer attached is ~0.025 ms for 2,000 bullets: it composes no matrices. The existing perf,
+alloc and O(active) suites pass unchanged.
+
+#### Tests
+
+338 → 385. New: `core.simulation.test.ts` (the core with no React renderer — `react` and
+`@react-three/fiber` are mocked to throw on import, in a `node` environment),
+`core.determinism.test.tsx` (two simulations, one hash; rendering under four frame groupings
+with interpolation never perturbs the simulation; an owned manual field and a headless
+simulation end one script in identical slots and doubles), `BulletField.external.test.tsx`
+(matrices match the simulation's positions × scale × fade; dirty-range upload once per frame;
+colors; byte-identical buffers versus an owned field with `orient`, `geometry` and `outline`;
+interpolation; the handle; the `<Emitter>` error; warnings) and `core.entry.test.ts` (builds
+with the package's tsup config and checks that everything `core.js`, `core.cjs` and
+`core.d.ts` load, transitively, is `three` — then runs the built `core.js`).
+
+---
+
 ## Unreleased (0.5.0)
 
 ### Simulation: manual stepping, bounds options, payload helpers

@@ -38,6 +38,10 @@ describe('Public API Barrel File (index.ts)', () => {
 
       // Rendering (0.5.0): ready-made bullet geometries
       'bulletGeometry',
+
+      // Headless simulation (0.6.0), also on the React-free `/core` entry
+      'createBulletSimulation',
+      'createSeededRandom',
     ];
 
     const actualExports = Object.keys(PublicAPI);

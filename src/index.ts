@@ -12,8 +12,23 @@ export { BulletManager } from './BulletManager';
 export { BulletField } from './BulletField';
 export { Emitter } from './Emitter';
 
+// Headless simulation (0.6.0) — the one implementation of the bullet sim,
+// React-free, also on the `/core` entry. `<BulletField>` runs one internally,
+// or renders yours through its `simulation` prop.
+export { createBulletSimulation } from './core/simulation';
+export type {
+  BulletSimulation,
+  BulletSimulationOptions,
+  BoundsCenterSource,
+  ForEachActiveCallback,
+  PoolExhaustedCallback,
+  Vector3Like,
+} from './core/simulation';
+
 // Pattern system
 export { gen, mod, compose } from './patterns';
+// Seeded generator for deterministic `gen.galaxy` / `gen.rose3D` (0.6.0).
+export { createSeededRandom } from './rng';
 export { BUILTIN_PATTERNS, resolvePattern } from './presets';
 
 // Payload bitfields — several small fields in the one per-bullet integer.

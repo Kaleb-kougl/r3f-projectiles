@@ -1,6 +1,6 @@
 import { Vector3, Quaternion } from 'three';
 import { acquire } from './pool';
-import type { BulletSpawnData, Modifier } from './types';
+import type { BulletSpawnData, Modifier } from './patternTypes';
 
 // Payload bitfields ride along on this entry because they are pattern-side
 // data with no React in them: `mod.payload(Shot.pack({ … }))` is written next
@@ -8,6 +8,10 @@ import type { BulletSpawnData, Modifier } from './types';
 // entry stays React- and R3F-free.
 export { definePayload } from './payload';
 export type { PayloadLayout, PayloadSchema, PayloadValues } from './payload';
+
+// The seeded generator that makes `gen.galaxy` / `gen.rose3D` replayable rides
+// along for the same reason: it is pattern-side and imports nothing.
+export { createSeededRandom } from './rng';
 
 // ---------------------------------------------------------------------------
 // Module-scope scratch objects — allocated ONCE, never inside a hot path.
@@ -104,13 +108,24 @@ export const gen = {
    * @param radius - Galaxy radius. @default 4
    * @param arms   - Number of spiral arms. @default 3
    * @param spin   - Tightness of spiral. @default 2
+   * @param rng    - Source of uniform numbers in `[0, 1)`, called twice per
+   *   bullet. @default Math.random — which makes this generator, and the
+   *   built-in `'galaxy'` preset, **non-deterministic**. Pass a seeded
+   *   generator (`createSeededRandom(seed)`) for a pattern that replays
+   *   bit-identically.
    */
-  galaxy(count: number, radius: number = 4, arms: number = 3, spin: number = 2): BulletSpawnData[] {
+  galaxy(
+    count: number,
+    radius: number = 4,
+    arms: number = 3,
+    spin: number = 2,
+    rng: () => number = Math.random,
+  ): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
     if (arms === 0) arms = 1;
     for (let i = 0; i < count; i++) {
       const armIndex = i % arms;
-      const dist = Math.random();
+      const dist = rng();
       // Logarithmic distribution for density near center
       const d = dist * dist;
 
@@ -119,7 +134,7 @@ export const gen = {
 
       const x = Math.cos(angle) * r;
       const z = Math.sin(angle) * r;
-      const y = (Math.random() - 0.5) * (radius * 0.2); // Flat disc with some thickness
+      const y = (rng() - 0.5) * (radius * 0.2); // Flat disc with some thickness
 
       const p = acquire();
       p.offset.set(x, y, z);
@@ -170,12 +185,22 @@ export const gen = {
    * @param count  - Number of bullets.
    * @param k      - Petal parameter (even → 2k petals, odd → k petals). @default 4
    * @param radius - Maximum petal radius. @default 2
+   * @param rng    - Source of uniform numbers in `[0, 1)`, called twice per
+   *   bullet. @default Math.random — which makes this generator, and the
+   *   built-in `'rose3D'` preset, **non-deterministic**. Pass a seeded
+   *   generator (`createSeededRandom(seed)`) for a pattern that replays
+   *   bit-identically.
    */
-  rose3D(count: number, k: number = 4, radius: number = 2): BulletSpawnData[] {
+  rose3D(
+    count: number,
+    k: number = 4,
+    radius: number = 2,
+    rng: () => number = Math.random,
+  ): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
     for (let i = 0; i < count; i++) {
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.random() * Math.PI;
+      const theta = rng() * Math.PI * 2;
+      const phi = rng() * Math.PI;
 
       // R modulated by cosine of angle × k
       const r = Math.abs(Math.cos(k * theta)) * radius;

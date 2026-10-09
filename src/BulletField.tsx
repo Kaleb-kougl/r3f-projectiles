@@ -18,11 +18,15 @@ import {
   type InstancedMesh as InstancedMeshType,
 } from 'three';
 import { useBulletRender } from './render/useBulletRender';
-import type { BulletOrient } from './render/orient';
+import type { BulletOrient, InstanceWriter } from './render/orient';
 import type { BulletOutline } from './render/outline';
-import { resolvePattern } from './presets';
-import { resolveEasing, fadeScale } from './easing';
-import { releaseSpawnData } from './pool';
+import { resolveEasing } from './easing';
+import { DEV } from './dev';
+import {
+  SimulationCore,
+  type BulletSimulation,
+  type PoolExhaustionReason,
+} from './core/simulation';
 import {
   createStepState,
   foldPendingRange,
@@ -31,7 +35,6 @@ import {
   type StepMode,
 } from './stepping';
 import type {
-  BulletSpawnData,
   EasingFn,
   EasingName,
   PatternFactory,
@@ -47,9 +50,6 @@ const REDUCED_MOTION_MAX = 200;
 
 /** Floats per instance matrix — the stride `instanceMatrix` update ranges use. */
 const MATRIX_STRIDE = 16;
-
-/** Shared placeholder so the sparse-set refs are never null before pool init. */
-const EMPTY_SLOTS = new Int32Array(0);
 
 // ---------------------------------------------------------------------------
 // GPU helpers
@@ -95,31 +95,21 @@ function markMatrixDirty(
 
 /**
  * Why a burst was short-changed — the fourth argument to
- * {@link BulletFieldProps.onPoolExhausted}.
- *
- * The two are worth telling apart because the remedies are different, and one
- * of them is "nothing":
- *
- * - `'pool-full'` — the shared slot pool had no free slots left. The honest
- *   fixes are the blunt ones: raise `maxBullets`, or slow the greedy emitter's
- *   `fireRate`. Raised by every spawn path.
- * - `'reduced-motion-budget'` — the field-wide 200-bullet reduced-motion
- *   snapshot budget was spent by earlier emitters, so this one was truncated
- *   in registration order. **The cap is not configurable**, and the pool
- *   itself may be nearly empty, so `maxBullets` is not the lever here — this
- *   reason exists so a consumer can stop reaching for it. Raised only from the
- *   reduced-motion snapshot path, and only when the budget (not the pool) was
- *   the binding constraint.
+ * {@link BulletFieldProps.onPoolExhausted}. Defined beside the headless
+ * simulation (`./core/simulation`), which raises `'pool-full'` itself, and
+ * re-exported here so the field's public surface is unchanged.
  */
-export type PoolExhaustionReason = 'pool-full' | 'reduced-motion-budget';
+export type { PoolExhaustionReason };
 
 /**
  * Raise {@link BulletFieldProps.onPoolExhausted} for one burst, if it was
  * short-changed and anyone is listening.
  *
- * Deliberately **once per burst**. Every spawn path calls this exactly once,
- * immediately after `spawnBullets` returns — the single point where both the
- * requested count and the spawned count are in hand. Pushing the check down
+ * Deliberately **once per burst**. Every field-side spawn path calls this
+ * exactly once, immediately after the core's `_burst` returns — the single
+ * point where both the requested count (`_lastRequested`) and the spawned
+ * count are in hand. (`fireAt` goes through the core's own `fireAt`, which
+ * applies the same rule itself.) Pushing the check down
  * into the spawn loop instead would produce one callback per dropped bullet:
  * 100 calls in one frame for a 100-bullet burst into a full pool, in a callback
  * a consumer is likely to log or count from.
@@ -152,28 +142,6 @@ function reportExhaustion(
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
-
-interface BulletState {
-  position: Vector3;
-  velocity: Vector3;
-  acceleration: Vector3;
-  delay: number;
-  life: number;
-  /** Opaque per-bullet integer, copied from spawn data; never interpreted here. */
-  payload: number;
-  /**
-   * Which emitter fired this bullet. Field-issued at registration and never
-   * recycled, so a bullet stays correctly attributed even after its emitter
-   * unregisters and its id is retired. `0` means "anonymous".
-   */
-  emitterId: number;
-  /**
-   * Per-bullet size multiplier, copied from spawn data. Multiplied into every
-   * matrix write that shows the bullet — the spawn-time write and the per-frame
-   * fade write — never into the writes that hide one.
-   */
-  scale: number;
-}
 
 /**
  * Props for the public `<Emitter>` component — the five of `<BulletManager>`'s
@@ -312,6 +280,14 @@ export interface EmitterRegistry {
  *
  * Both paths draw from the same pool and the same monotonic id counter, so
  * provenance is comparable across them.
+ *
+ * ## With an external `simulation`
+ * On a field rendering a {@link BulletFieldProps.simulation}, every member
+ * forwards to that simulation — `fireAt`, `acquireEmitter`, `releaseEmitter`,
+ * `clear`, `activeCount`, `activeCountFor`, `forEachActive`, `setPayload` —
+ * except `step()`, which is a no-op with a one-time development warning: the
+ * simulation belongs to your code, and so does its clock. A forwarded spawn or
+ * consumption is drawn on the next rendered frame, not flushed inline.
  */
 export interface BulletFieldHandle {
   /**
@@ -421,9 +397,11 @@ export interface BulletFieldHandle {
    *
    * **A no-op** when the field is in `'auto'` mode (with a one-time warning in
    * development builds — the field already steps itself), while `paused` (the
-   * step is dropped, not queued), before the field has mounted, and for any
-   * `dt` that is not a finite number greater than `0` (`NaN`, negative and
-   * infinite values also warn once in development). Never throws.
+   * step is dropped, not queued), before the field has mounted, for any `dt`
+   * that is not a finite number greater than `0` (`NaN`, negative and
+   * infinite values also warn once in development), and on a field rendering
+   * an external `simulation` (one development warning — step the simulation
+   * itself). Never throws.
    */
   step(dt: number): void;
   /**
@@ -468,6 +446,12 @@ export interface EmitterRegistryHandle
    * because a paused field's frame loop will never flush for it.
    */
   fire(entry: EmitterEntry): void;
+  /**
+   * Throw if this field cannot host an `<Emitter>` — that is, if it renders an
+   * external {@link BulletFieldProps.simulation}. `<Emitter>` calls it during
+   * render, so the error points at the offending JSX.
+   */
+  assertCanHostEmitters(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +478,8 @@ export interface EmitterRegistryHandle
  * hook on purpose: a second hook in this file switches on the React Compiler's
  * lint pass for the whole module, which then rejects the two deliberate
  * mutations the frame loop is built on (the `propsRef` write during render and
- * the reused `_spawnRange` out-param). `<Emitter>` does the `useContext` and
+ * the in-place writes to memoized objects — the core's config and its
+ * last-operation span, the step state). `<Emitter>` does the `useContext` and
  * the null check itself. Internal either way — neither is barrelled.
  */
 export const EmitterRegistryContext =
@@ -649,6 +634,59 @@ export interface BulletFieldProps {
    */
   outline?: BulletOutline;
   /**
+   * Render a simulation **you own** instead of running one.
+   *
+   * Pass a {@link BulletSimulation} from `createBulletSimulation()` — the
+   * React-free core your game steps on its own fixed tick, headlessly
+   * replayable — and this field becomes a pure renderer of it. Once per
+   * rendered frame it syncs instance matrices (and, for bullets spawned since
+   * the previous frame, colors) over the simulation's dirty slot range, through
+   * the same instance writer the field always uses, and uploads them once.
+   * `geometry`, `orient`, `outline`, `material` and `bulletRadius` work exactly
+   * as they do on a field that owns its bullets.
+   *
+   * The rules, all of which follow from "the simulation is yours":
+   *
+   * - **The field never steps, spawns into or culls it.** Its frame loop only
+   *   reads. `step()` on the handle is a no-op (one development warning); every
+   *   other handle member forwards to the simulation.
+   * - **The simulation's own options govern it.** `maxBullets` (the mesh is
+   *   sized from `simulation.capacity`), `boundsLimit`, `boundsCenter`,
+   *   `fadeTime`, `fadeCurve`, `stepMode`, `paused`, `reducedMotion` and
+   *   `onPoolExhausted` are ignored, with one development warning listing any
+   *   you passed.
+   * - **`<Emitter>` children throw** during render: nothing would ever step
+   *   their cadence. Fire from your own fixed step with `sim.fireAt`.
+   * - **One renderer per simulation.** The sync consumes the dirty range
+   *   (`markSynced`), so a second field rendering the same simulation would
+   *   miss updates.
+   * - **`onBulletCount`** is raised once per rendered frame in which the
+   *   simulation stepped at least once since the previous frame.
+   * - **Step before the field's frame callback** (a negative-priority
+   *   `useFrame`, or outside R3F's loop) or the steps show one frame late.
+   *
+   * May be swapped for another simulation at runtime (the next frame redraws
+   * every live bullet); switching a field between owning and rendering resets
+   * the field's own pool. Give it a `key` if you would rather remount.
+   */
+  simulation?: BulletSimulation;
+  /**
+   * With {@link simulation}: render between the simulation's last two steps.
+   * Called once per rendered frame; return the fraction `alpha` in `[0, 1]`
+   * of a step your accumulator has banked (`accumulator / STEP`), and each
+   * bullet is drawn at `previous + (current − previous) × alpha`. Values
+   * outside `[0, 1]` are clamped; `NaN` draws the current state.
+   *
+   * Requires a simulation created with `interpolation: true`, which keeps the
+   * start-of-step positions this reads; on any other it is ignored with a
+   * one-time development warning. Interpolation rewrites every slot up to the
+   * high-water mark each frame (the in-between position changes every frame
+   * even when no step ran), so it costs one matrix per live bullet per frame —
+   * still zero allocation. Position only: the fade and `orient="velocity"`
+   * follow the latest step. Ignored without `simulation`.
+   */
+  interpolate?: () => number;
+  /**
    * The field's emitters — `<Emitter>` elements, which render nothing and
    * register themselves through the registry context this component provides.
    * Service order is registration order, which is mount order, which is the
@@ -672,8 +710,16 @@ export interface BulletFieldProps {
  *
  * - one `<instancedMesh>`, one geometry, one material
  * - one slot pool, fronted by a sparse set (`dense` / `slotToDense` / `free`)
+ *   — held by a {@link SimulationCore}, the same headless simulation the
+ *   package's `/core` entry exports, which this component drives
  * - one `useFrame`, which walks the emitter registry in registration order,
  *   services each due shot, then runs a single simulate + draw pass
+ *
+ * ## Owning or rendering
+ * By default the field **owns** its simulation: it creates the core, steps it
+ * (per frame, or per `step(dt)` under `stepMode="manual"`), and services its
+ * `<Emitter>` children's cadences. Given a {@link BulletFieldProps.simulation}
+ * it **renders** one you own instead, and does nothing else to it.
  *
  * ```tsx
  * <BulletField maxBullets={2000} material={<meshStandardMaterial emissive="hotpink" />}>
@@ -733,6 +779,11 @@ export interface BulletFieldProps {
  *   never per bullet and never per step, and always through
  *   {@link markMatrixDirty}.
  *
+ * The simulation half of that loop — motion, life, culling, consumption — is
+ * the headless core's `_advance`, which writes each matrix through a render
+ * sink at exactly the points this component always wrote them; the claims
+ * above are the core's as much as the field's.
+ *
  * ## Manual stepping
  * `stepMode="manual"` moves the simulation off the render clock: the frame
  * loop only uploads, and `step(dt)` on the handle advances the simulation —
@@ -741,13 +792,123 @@ export interface BulletFieldProps {
  * - **DynamicDrawUsage**: GPU buffer hint applied on mount.
  * - **Pool init at (0, −999, 0)**: prevents first-frame flash.
  */
+// ---------------------------------------------------------------------------
+// Module-scope helpers
+// ---------------------------------------------------------------------------
+//
+// Module scope rather than closures in the component: a second hook in this
+// file switches on the React Compiler lint pass for the whole module, which
+// then rejects the frame loop's deliberate mutations.
+
+/** Write the matrix that parks a slot: off-screen at (0, −999, 0), scale 0. */
+function writeHidden(mesh: InstancedMeshType, slot: number, dummy: Object3D): void {
+  dummy.position.set(0, -999, 0);
+  dummy.scale.set(0, 0, 0);
+  dummy.updateMatrix();
+  mesh.setMatrixAt(slot, dummy.matrix);
+}
+
+/**
+ * Props that configure a simulation, and so mean nothing to a field that
+ * renders an external one. Listed once, for the development warning.
+ */
+const IGNORED_WITH_SIMULATION = [
+  'maxBullets',
+  'boundsLimit',
+  'boundsCenter',
+  'fadeTime',
+  'fadeCurve',
+  'paused',
+  'reducedMotion',
+  'stepMode',
+  'onPoolExhausted',
+] as const;
+
+function externalEmitterError(): Error {
+  return new Error(
+    '[r3f-projectiles] <Emitter> cannot be rendered inside a <BulletField simulation={…}>: ' +
+      'an external simulation is stepped by your code, so nothing would ever service the ' +
+      "emitter's cadence. Fire from your own fixed step with sim.fireAt(origin, pattern, id).",
+  );
+}
+
+/**
+ * One rendered frame of an **external** simulation: write every slot in its
+ * dirty range — widened to the whole live span on a `full` sync (a new or
+ * newly attached simulation) and while interpolating — and upload once.
+ *
+ * Per slot: a free slot is parked; a slot (re)spawned since the last sync gets
+ * its color and a fresh heading; a delayed bullet is parked; a visible one is
+ * drawn through the field's {@link InstanceWriter} at its current position —
+ * or, with `alpha >= 0`, between its start-of-step and current positions —
+ * scaled by its own scale × fade, exactly as an owned field's step draws it.
+ *
+ * The range is contiguous, so it may include slots that did not change;
+ * rewriting those is idempotent. Allocates nothing: `color` and `scratch` are
+ * the field's own scratch objects.
+ */
+function syncExternal(
+  mesh: InstancedMeshType,
+  sim: BulletSimulation,
+  writer: InstanceWriter,
+  dummy: Object3D,
+  color: Color,
+  scratch: Vector3,
+  alpha: number,
+  full: boolean,
+): void {
+  const cap = mesh.instanceMatrix.count;
+  const hw = Math.min(sim.highWater, cap);
+  let min = sim.dirtyMin;
+  let max = sim.dirtyMax;
+  const interpolating = alpha >= 0;
+  if ((full || interpolating) && hw > 0) {
+    if (max < min) {
+      min = 0;
+      max = hw - 1;
+    } else {
+      if (min > 0) min = 0;
+      if (max < hw - 1) max = hw - 1;
+    }
+  }
+  if (max > cap - 1) max = cap - 1;
+
+  let colors = false;
+  for (let i = min; i <= max; i++) {
+    if (!sim.isLive(i)) {
+      writeHidden(mesh, i, dummy);
+      continue;
+    }
+    if (full || sim.spawnedSinceSync(i)) {
+      mesh.setColorAt(i, sim.colorAt(i, color));
+      writer.prime(i, sim.velocityAt(i));
+      colors = true;
+    }
+    if (!sim.isVisible(i)) {
+      writeHidden(mesh, i, dummy);
+      continue;
+    }
+    const position = interpolating
+      ? sim.previousPositionAt(i, scratch).lerp(sim.positionAt(i), alpha)
+      : sim.positionAt(i);
+    writer.write(mesh, i, position, sim.velocityAt(i), sim.fadeAt(i) * sim.scaleAt(i));
+  }
+
+  mesh.count = hw;
+  markMatrixDirty(mesh, min, max);
+  if (colors && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  sim.markSynced();
+}
+
 export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
-  function BulletField(
+  function BulletField(props, ref) {
     // ---- The one place a field-level default lives -------------------------
     // Not duplicated in `<BulletManager>`: the wrapper forwards whatever it was
     // handed, `undefined` included, and `undefined` is exactly what selects the
-    // value below. One definition, so there is nothing to drift.
-    {
+    // value below. One definition, so there is nothing to drift. (`props` is
+    // kept whole only so the external-simulation warning can tell a prop you
+    // passed from a default.)
+    const {
       maxBullets = 2000,
       boundsLimit = 25,
       bulletRadius = 0.12,
@@ -763,12 +924,18 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       geometry,
       orient = 'none',
       outline,
+      simulation,
+      interpolate,
       children,
-    },
-    ref,
-  ) {
+    } = props;
+
     const meshRef = useRef<InstancedMeshType | null>(null);
-    const bulletsRef = useRef<BulletState[]>([]);
+
+    /**
+     * Instances in the mesh: the field's own `maxBullets`, or the external
+     * simulation's fixed capacity.
+     */
+    const capacity = simulation ? simulation.capacity : maxBullets;
 
     // ---- Emitter registry --------------------------------------------------
     //
@@ -777,46 +944,12 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
     const entriesRef = useRef<EmitterEntry[]>([]);
 
     /**
-     * Next provenance id to hand out. Monotonic, starts at `1`, and is **never**
-     * decremented or reused — not on unregister, not on `clear()`, not on a
-     * `maxBullets` realloc.
-     *
-     * Never recycling is the whole point. Ids are stamped onto bullets that
-     * outlive their emitter, so a recycled id would let a freshly mounted
-     * emitter inherit a dead one's in-flight bullets — and, once `clear(id)`
-     * lands, destroy them. `0` is reserved for "anonymous" and is never issued.
-     */
-    const nextEmitterIdRef = useRef(1);
-
-    /**
      * Reduced motion's 200-bullet cap is field-wide, not per emitter: it exists
      * to keep the static snapshot modest, which is a whole-scene concern. So it
      * is a budget that emitters draw down in registration order, and a late
      * emitter is truncated rather than every emitter being thinned.
      */
     const reducedMotionBudgetRef = useRef(REDUCED_MOTION_MAX);
-
-    // ---- Sparse set over the slot pool -------------------------------------
-    //
-    //   dense[0 .. denseCount)   packed list of ACTIVE slot indices
-    //   slotToDense[slot]        reverse map into `dense`, -1 when slot is free
-    //   free[0 .. freeTop)       LIFO stack of available slots
-    //
-    // Acquire and release are O(1); the frame loop, `forEachActive`,
-    // `activeCount` and `clear()` become O(active) rather than O(maxBullets).
-    // All three arrays are sized from `maxBullets` and are reallocated by the
-    // same effect that reallocates the bullet pool — release site 5.
-    const denseRef = useRef<Int32Array>(EMPTY_SLOTS);
-    const slotToDenseRef = useRef<Int32Array>(EMPTY_SLOTS);
-    const freeRef = useRef<Int32Array>(EMPTY_SLOTS);
-    const freeTopRef = useRef(0);
-    const denseCountRef = useRef(0);
-    /**
-     * Highest slot index ever occupied, plus one — bounds `mesh.count` so the
-     * vertex shader never runs for parked instances. Decays to 0 whenever the
-     * field empties.
-     */
-    const highWaterRef = useRef(0);
 
     // ---- Prop refs for reading inside useFrame without stale closures ------
     const propsRef = useRef({
@@ -833,6 +966,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       fadeCurveFn: resolveEasing(fadeCurve),
       onBulletCount,
       onPoolExhausted,
+      simulation,
+      interpolate,
     });
     propsRef.current = {
       paused,
@@ -844,17 +979,18 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       fadeCurveFn: resolveEasing(fadeCurve),
       onBulletCount,
       onPoolExhausted,
+      simulation,
+      interpolate,
     };
 
     // ---- Scratch objects (allocated ONCE, reused every frame) --------------
-    const { _dummy, _tempColor, _sourcePos, _spawnRange } = useMemo(
+    const { _dummy, _tempColor, _sourcePos, _lerp } = useMemo(
       () => ({
         _dummy: new Object3D(),
         _tempColor: new Color(),
         _sourcePos: new Vector3(),
-        // Out-param for `spawnBullets`: the slot span it wrote, so the caller
-        // can fold it into its own update range without allocating a result.
-        _spawnRange: { min: 0, max: -1 },
+        // Interpolated position for an external simulation's sync.
+        _lerp: new Vector3(),
       }),
       [],
     );
@@ -867,106 +1003,96 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
     const _step = useMemo(createStepState, []);
 
     /**
+     * External-simulation bookkeeping, mutated in place: whether the next sync
+     * must redraw every live bullet (set on attach), the simulation's
+     * `stepCount` at the previous sync (for `onBulletCount`), and the
+     * warn-once flags.
+     */
+    const _ext = useMemo(
+      () => ({
+        full: true,
+        lastStepCount: 0,
+        warnedStep: false,
+        warnedInterpolate: false,
+      }),
+      [],
+    );
+
+    /**
      * The simulation step, reached by the handle's `step()`. A ref because the
      * handle is built before the step function is (the step lives where the
      * frame loop's body always has, further down); both are created once, so
      * this is assigned once in practice and never read stale.
      */
-    const advanceRef = useRef<
-      ((mesh: InstancedMeshType, dt: number) => void) | null
-    >(null);
+    const advanceRef = useRef<((dt: number) => void) | null>(null);
 
     // ---- Render options (geometry / orient / outline) ----------------------
-    // Composes every matrix that SHOWS a bullet (both write sites below), and
-    // owns the camera sync and the outline mesh. Stable for the field's life.
+    // Composes every matrix that SHOWS a bullet, and owns the camera sync and
+    // the outline mesh. Stable for the field's life.
     const writer = useBulletRender(meshRef, {
-      maxBullets,
+      maxBullets: capacity,
       bulletRadius,
       geometry,
       orient,
       outline,
     });
 
-    // ---- Sparse-set operations (stable identity, close over the refs) ------
-    const { acquireSlot, releaseSlot, syncMeshCount } = useMemo(
-      () => ({
-        /** Pop a free slot and append it to `dense`. Returns -1 when full. */
-        acquireSlot(): number {
-          if (freeTopRef.current === 0) return -1;
-          const slot = freeRef.current[--freeTopRef.current];
-          const d = denseCountRef.current++;
-          denseRef.current[d] = slot;
-          slotToDenseRef.current[slot] = d;
-          if (slot >= highWaterRef.current) highWaterRef.current = slot + 1;
-          return slot;
+    // ---- The field's own simulation ----------------------------------------
+    //
+    // The headless core — the one implementation of pool, spawn, motion, life,
+    // culling, consumption and emitter ids. Created empty here and sized by the
+    // pool effect below, so a field that only renders an external simulation
+    // never allocates a pool of its own.
+    //
+    // Its render sink writes matrices inline, at exactly the points this
+    // component always wrote them, through the same writer — so an owned
+    // field's GPU writes (which slots, how many per step, what values) are
+    // unchanged by the move. Every sink method is a no-op before mount.
+    const core = useMemo(() => {
+      const c = new SimulationCore({ maxBullets: 0 });
+      c._sink = {
+        spawned(slot, color, primeVelocity) {
+          const mesh = meshRef.current;
+          if (!mesh) return;
+          mesh.setColorAt(slot, color);
+          // Fresh heading for a recycled slot (orient="velocity" only), from
+          // the PATTERN's velocity so a zero-velocity snapshot still aims.
+          writer.prime(slot, primeVelocity);
         },
+        show(slot, position, velocity, scale) {
+          const mesh = meshRef.current;
+          if (mesh) writer.write(mesh, slot, position, velocity, scale);
+        },
+        hide(slot) {
+          const mesh = meshRef.current;
+          if (mesh) writeHidden(mesh, slot, _dummy);
+        },
+      };
+      return c;
+    }, [writer, _dummy]);
 
-        /**
-         * Swap-remove `slot` from `dense` and push it back onto the free stack.
-         *
-         * The last live entry moves into the vacated position, which is why
-         * every walk over `dense` that can release must run BACKWARDS: a
-         * forward walk would skip the relocated entry.
-         */
-        releaseSlot(slot: number): void {
-          const d = slotToDenseRef.current[slot];
-          if (d < 0) return; // already free — never double-push
-          const last = denseRef.current[--denseCountRef.current];
-          denseRef.current[d] = last;
-          slotToDenseRef.current[last] = d;
-          slotToDenseRef.current[slot] = -1;
-          freeRef.current[freeTopRef.current++] = slot;
-        },
-
-        /**
-         * Point `mesh.count` at the high-water mark, decaying it to zero once
-         * the field has emptied. Bounds the draw, not the upload.
-         */
-        syncMeshCount(mesh: InstancedMeshType): void {
-          if (denseCountRef.current === 0) highWaterRef.current = 0;
-          mesh.count = highWaterRef.current;
-        },
-      }),
-      [],
+    /**
+     * Point `mesh.count` at the owned pool's high-water mark, which decays to
+     * zero once the field has emptied. Bounds the draw, not the upload.
+     */
+    const syncMeshCount = useCallback(
+      (mesh: InstancedMeshType): void => {
+        mesh.count = core.highWater;
+      },
+      [core],
     );
 
-    // ---- Pool initialization (mount only) ----------------------------------
+    // ---- Pool initialization (mount, and capacity / simulation changes) ----
     useEffect(() => {
       const mesh = meshRef.current;
       if (!mesh) return;
 
-      // Allocate the CPU-side bullet state array ONCE
-      const pool: BulletState[] = new Array(maxBullets);
-      for (let i = 0; i < maxBullets; i++) {
-        pool[i] = {
-          position: new Vector3(),
-          velocity: new Vector3(),
-          acceleration: new Vector3(),
-          delay: 0,
-          life: 0,
-          payload: 0,
-          emitterId: 0,
-          scale: 1,
-        };
-      }
-      bulletsRef.current = pool;
-
-      // ---- Release site 5: mass release by array swap --------------------
-      // The old pool is discarded wholesale, so every slot it held is gone.
-      // Liveness used to live inside that array and so self-healed; the sparse
-      // set lives in sibling refs the swap does not touch, and must be reset
-      // here explicitly or the field leaks every slot it had allocated.
-      const dense = new Int32Array(maxBullets);
-      const slotToDense = new Int32Array(maxBullets).fill(-1);
-      const free = new Int32Array(maxBullets);
-      // Filled descending so the LIFO pops 0, 1, 2, … on a virgin pool.
-      for (let i = 0; i < maxBullets; i++) free[i] = maxBullets - 1 - i;
-      denseRef.current = dense;
-      slotToDenseRef.current = slotToDense;
-      freeRef.current = free;
-      freeTopRef.current = maxBullets;
-      denseCountRef.current = 0;
-      highWaterRef.current = 0;
+      // ---- Release site 5: mass release ----
+      // The owned pool is (re)sized and every slot freed. An external
+      // simulation is not ours to reset: it is only redrawn in full next frame.
+      if (!simulation) core._reset(maxBullets);
+      _ext.full = true;
+      _ext.lastStepCount = simulation ? simulation.stepCount : 0;
 
       // GPU buffer hint — tells the driver we'll update every frame
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -974,10 +1100,10 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       // Full capacity while priming, so `setMatrixAt`/`setColorAt` see every
       // slot and `instanceColor` is allocated at full size before `count` is
       // ever lowered to the high-water mark below.
-      mesh.count = maxBullets;
+      mesh.count = capacity;
 
       // Prevent first-frame flash: park every instance off-screen + black
-      for (let i = 0; i < maxBullets; i++) {
+      for (let i = 0; i < capacity; i++) {
         _dummy.position.set(0, -999, 0);
         _dummy.scale.set(1, 1, 1);
         _dummy.updateMatrix();
@@ -988,110 +1114,36 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       // Manual steps taken since the last frame described the OLD pool's slots
       // (possibly beyond the new capacity); the full upload below covers this one.
       resetPending(_step);
-      markMatrixDirty(mesh, 0, maxBullets - 1);
+      markMatrixDirty(mesh, 0, capacity - 1);
       mesh.instanceColor!.needsUpdate = true;
 
-      // Nothing is alive yet, so nothing needs drawing.
+      // Nothing is drawn yet: an owned pool is empty, and an external
+      // simulation's live bullets are drawn by the next frame's full sync.
       mesh.count = 0;
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [maxBullets]);
+    }, [capacity, simulation]);
 
-    // ---- Internal spawn function (zero-allocation) -------------------------
-    /**
-     * Spawn a burst. Returns the number of bullets actually spawned and writes
-     * the slot span it touched into `_spawnRange` for the caller's update
-     * range. Slot acquisition is O(1) per bullet, so a burst is O(burst)
-     * rather than O(burst × maxBullets).
-     */
-    const spawnBullets = useMemo(() => {
-      return (
-        mesh: InstancedMeshType,
-        bullets: BulletState[],
-        sourcePos: Vector3,
-        spawnData: BulletSpawnData[],
-        zeroVelocity: boolean,
-        emitterId: number,
-        cap?: number,
-      ): number => {
-        let spawned = 0;
-        let minSlot = 0;
-        let maxSlot = -1;
-        for (let d = 0; d < spawnData.length; d++) {
-          if (cap !== undefined && spawned >= cap) break;
-
-          // Pop a free slot — O(1)
-          const slotIdx = acquireSlot();
-          if (slotIdx === -1) break; // pool exhausted
-
-          if (maxSlot < 0) {
-            minSlot = slotIdx;
-            maxSlot = slotIdx;
-          } else if (slotIdx < minSlot) {
-            minSlot = slotIdx;
-          } else if (slotIdx > maxSlot) {
-            maxSlot = slotIdx;
-          }
-
-          const data = spawnData[d];
-          const bullet = bullets[slotIdx];
-
-          bullet.position.copy(sourcePos).add(data.offset);
-          bullet.delay = data.delay;
-          bullet.life = data.life;
-          bullet.payload = data.payload;
-          bullet.emitterId = emitterId;
-          // No `?? 1` here, deliberately. `scale` is REQUIRED on
-          // `BulletSpawnData` and `acquire()` resets it on both branches, so
-          // pool-sourced data can never carry `undefined`. The only way to get
-          // there is a hand-rolled `PatternFactory` building bare object
-          // literals, which TypeScript already rejects at compile time — a `??`
-          // would downgrade that compile error into a silent runtime path.
-          // (`color` keeps its `??` below because it is genuinely nullable.)
-          bullet.scale = data.scale;
-
-          if (zeroVelocity) {
-            bullet.velocity.set(0, 0, 0);
-            bullet.acceleration.set(0, 0, 0);
-          } else {
-            bullet.velocity.copy(data.velocity);
-            bullet.acceleration.copy(data.acceleration);
-          }
-
-          // Zero-allocation color set — reuse _tempColor scratch object
-          _tempColor.set(data.color ?? 0xff3333);
-          mesh.setColorAt(slotIdx, _tempColor);
-
-          // Fresh heading for a recycled slot (orient="velocity" only), from
-          // the PATTERN's velocity so a zero-velocity snapshot still aims.
-          writer.prime(slotIdx, data.velocity);
-
-          // If no delay, position immediately; otherwise hide at -999.
-          //
-          // ---- Per-bullet scale, WRITE SITE 2 ----
-          // This is the load-bearing one. Two whole paths never reach the fade
-          // line in the simulate loop: `reducedMotion` spawns and returns above
-          // it, and `paused` returns before it — so for a reduced-motion
-          // snapshot, or a `fire()` while paused, this is the ONLY matrix write
-          // the bullet ever receives. Hardcoding `1` here made `mod.scale()` a
-          // permanent no-op in exactly the accessibility snapshot that has no
-          // animation to convey size any other way.
-          if (bullet.delay <= 0) {
-            writer.write(mesh, slotIdx, bullet.position, bullet.velocity, bullet.scale);
-          } else {
-            _dummy.position.set(0, -999, 0);
-            _dummy.scale.set(0, 0, 0);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(slotIdx, _dummy.matrix);
-          }
-
-          spawned++;
+    // ---- Development warning: props an external simulation ignores --------
+    // Computed during render (a pure string), reported from an effect.
+    let ignoredProps = '';
+    if (DEV) {
+      if (simulation) {
+        for (const k of IGNORED_WITH_SIMULATION) {
+          if (props[k] !== undefined) ignoredProps += (ignoredProps ? ', ' : '') + k;
         }
-
-        _spawnRange.min = minSlot;
-        _spawnRange.max = maxSlot;
-        return spawned;
-      };
-    }, [_dummy, _tempColor, _spawnRange, acquireSlot, writer]);
+      } else if (interpolate !== undefined) {
+        ignoredProps = 'interpolate';
+      }
+    }
+    useEffect(() => {
+      if (!ignoredProps) return;
+      console.warn(
+        simulation
+          ? `[r3f-projectiles] <BulletField simulation={…}> ignores ${ignoredProps}: an ` +
+              'external simulation is configured by its own options (createBulletSimulation).'
+          : '[r3f-projectiles] <BulletField> ignores interpolate without a simulation prop.',
+      );
+    }, [ignoredProps, simulation]);
 
     // ---- Imperative handle -------------------------------------------------
     //
@@ -1099,18 +1151,23 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
     // same object is ALSO the registry context value: an `<Emitter>` child
     // needs `register`/`unregister`/`fire` during render, and only a value the
     // render body holds can be handed to a provider. Every dependency below is
-    // itself `useMemo(…, [])`-stable, so this object is created exactly once —
-    // the context value never changes identity and no consumer re-registers.
+    // itself stable, so this object is created exactly once — the context
+    // value never changes identity and no consumer re-registers.
     //
     // Typed as the wider `EmitterRegistryHandle` because that is what the
     // provider needs. `useImperativeHandle` below narrows the SAME object to
     // the public `BulletFieldHandle` at the ref boundary — the split is
     // entirely in the types; there is one object, and there must be.
+    //
+    // Each member reads the CURRENT `simulation` prop: with one, it forwards to
+    // that simulation (and `step` refuses); without, it drives the owned core
+    // and flushes inline exactly as this component always has.
     const handle = useMemo<EmitterRegistryHandle>(
       () => ({
         /**
          * Append an emitter to the registry and issue it a fresh provenance
-         * id. Never re-renders the field.
+         * id from the core's counter — the same one `acquireEmitter()` and
+         * `fireAt` use. Never re-renders the field.
          *
          * Registering *is* acquiring: an emitter that unregisters and
          * registers again is a different emitter as far as provenance is
@@ -1118,22 +1175,18 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
          * from inheriting the bullets its previous incarnation left in flight.
          */
         register(entry: EmitterEntry) {
+          if (propsRef.current.simulation) throw externalEmitterError();
           const entries = entriesRef.current;
           if (entries.indexOf(entry) === -1) {
-            entry.id = nextEmitterIdRef.current++;
+            entry.id = core.acquireEmitter();
             entries.push(entry);
           }
         },
 
         /**
          * Drop an emitter, leaving the surviving entries in their order, and
-         * retire its id.
-         *
-         * Bullets already in flight are untouched on purpose. They keep the id
-         * they were stamped with, and because ids never recycle, nothing the
-         * field issues later can ever collide with it — so a consumer walking
-         * `forEachActive` still attributes them correctly long after the
-         * emitter that fired them is gone.
+         * retire its id. Bullets already in flight keep the id they were
+         * stamped with; ids never recycle, so nothing issued later collides.
          */
         unregister(entry: EmitterEntry) {
           const entries = entriesRef.current;
@@ -1142,140 +1195,78 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
           entry.id = 0;
         },
 
+        assertCanHostEmitters() {
+          if (propsRef.current.simulation) throw externalEmitterError();
+        },
+
         /** Manually trigger one burst for a single emitter. */
         fire(entry: EmitterEntry) {
+          // Unreachable with an external simulation: `<Emitter>` throws first.
+          if (propsRef.current.simulation) return;
           const mesh = meshRef.current;
           if (!mesh) return;
-          const bullets = bulletsRef.current;
           const { pattern: pat, spawnCenterY: cy, origin: originRef } = entry.props;
 
           const originVec = originRef?.current;
           if (originVec) _sourcePos.copy(originVec);
           else _sourcePos.set(0, cy, 0);
-          const spawnData = resolvePattern(pat);
-          const requested = spawnData.length;
-          const spawned = spawnBullets(
-            mesh,
-            bullets,
-            _sourcePos,
-            spawnData,
-            false,
-            entry.id,
-          );
-          releaseSpawnData(spawnData);
+          const spawned = core._burst(_sourcePos, pat, entry.id, false);
           // Only one thing can cut a `fire()` short: no free slots.
           reportExhaustion(
             propsRef.current.onPoolExhausted,
             entry.id,
-            requested,
+            core._lastRequested,
             spawned,
             'pool-full',
           );
 
           syncMeshCount(mesh);
-          markMatrixDirty(mesh, _spawnRange.min, _spawnRange.max);
+          markMatrixDirty(mesh, core._opMin, core._opMax);
           // Colors are written only at spawn, so only a real spawn dirties them.
           if (spawned > 0 && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
         },
 
         /**
-         * Spawn one burst at an arbitrary origin — the no-React path.
-         *
-         * Everything `fire()` does, minus the entry: the origin is given rather
-         * than resolved, the pattern is given rather than declared, and the
-         * provenance id is the caller's (or the reserved anonymous `0`). It
-         * works while the field is paused and flushes inline for the same
-         * reason `fire()` does — a paused frame loop will never flush for it.
-         *
-         * `origin` is copied into the field's own scratch vector immediately,
-         * so the caller may reuse or mutate theirs the moment this returns.
-         *
-         * Safe to call from inside a `forEachActive` callback: new slots are
-         * appended above the backwards walk's cursor, so the walk can neither
-         * revisit them nor lose an entry to them.
+         * Spawn one burst at an arbitrary origin — the core's own `fireAt`,
+         * which keeps the id counter an upper bound on every id it is handed
+         * and reports `'pool-full'` (here, to this field's `onPoolExhausted`).
+         * Works while paused and flushes inline, because a paused frame loop
+         * will never flush for it. Safe from inside a `forEachActive` callback.
          */
         fireAt(
           origin: Vector3,
           pattern: PatternKey | PatternFactory,
           emitterId = 0,
         ) {
+          const props = propsRef.current;
+          if (props.simulation) {
+            props.simulation.fireAt(origin, pattern, emitterId);
+            return;
+          }
           const mesh = meshRef.current;
           if (!mesh) return;
-          const bullets = bulletsRef.current;
-
-          // ---- Keep the counter an upper bound on every id ever seen ----
-          // `emitterId` is an open parameter, so a consumer managing its own
-          // ids can hand over one the field never issued. Absorbing it here
-          // means a later `acquireEmitter()` can never return an id that
-          // bullets already in flight are stamped with — which is decision 1's
-          // cross-emitter invariant, held even for a caller that freelances.
-          // The default `0` is below the counter's floor of `1` and so is
-          // always a no-op: anonymous stays anonymous.
-          if (emitterId >= nextEmitterIdRef.current) {
-            nextEmitterIdRef.current = emitterId + 1;
-          }
-
-          _sourcePos.copy(origin);
-          const spawnData = resolvePattern(pattern);
-          const requested = spawnData.length;
-          const spawned = spawnBullets(
-            mesh,
-            bullets,
-            _sourcePos,
-            spawnData,
-            false,
-            emitterId,
-          );
-          releaseSpawnData(spawnData);
-          // `fireAt` draws no budget, so the pool is the only thing that can
-          // refuse it.
-          reportExhaustion(
-            propsRef.current.onPoolExhausted,
-            emitterId,
-            requested,
-            spawned,
-            'pool-full',
-          );
+          core.onPoolExhausted = props.onPoolExhausted;
+          const spawned = core.fireAt(origin, pattern, emitterId);
 
           syncMeshCount(mesh);
-          markMatrixDirty(mesh, _spawnRange.min, _spawnRange.max);
+          markMatrixDirty(mesh, core._opMin, core._opMax);
           if (spawned > 0 && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
         },
 
-        /**
-         * Issue a provenance id to a caller that has no entry to stamp.
-         *
-         * The **same** counter `register()` draws from, so a swarm's imperative
-         * archers and the JSX `<Emitter>`s in the same field can never collide.
-         * It has to be a separate method rather than the same one because
-         * `register` stamps `entry.id` — the frame loop reads the id off the
-         * entry, so `register` has nowhere to return it from, and a caller
-         * holding no entry has nothing for it to stamp.
-         */
+        /** Issue a provenance id — the counter `register()` draws from too. */
         acquireEmitter(): number {
-          return nextEmitterIdRef.current++;
+          const sim = propsRef.current.simulation;
+          return sim ? sim.acquireEmitter() : core.acquireEmitter();
         },
 
         /**
-         * Retire an id.
-         *
-         * There is deliberately **nothing to reclaim**: the counter never
-         * recycles, so retiring an id means only that it is never issued again,
-         * which it already was not. What the call is for is the **negative**
-         * guarantee, and that is a real contract worth stating in code — it
-         * does not clear that emitter's bullets, does not re-attribute them to
-         * `0` or to anyone else, and does not touch any other emitter. A dying
-         * archer whose bullets should vanish calls `clear(id)` first; one whose
-         * bullets should finish their flight just releases. Separating those
-         * two is the whole point of provenance, and folding a `clear` in here
-         * would take the choice away.
-         *
-         * The one line of state it does own is the same upper-bound rule
-         * `fireAt` applies: an id the consumer names is an id the field will
-         * never issue, whether or not the field issued it in the first place.
+         * Retire an id. Clears nothing, re-attributes nothing; only advances
+         * the counter past an id the consumer named.
          */
         releaseEmitter(id: number): void {
-          if (id >= nextEmitterIdRef.current) nextEmitterIdRef.current = id + 1;
+          const sim = propsRef.current.simulation;
+          if (sim) sim.releaseEmitter(id);
+          else core.releaseEmitter(id);
         },
 
         /**
@@ -1289,13 +1280,11 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
          * pre-split `clear()` reset all three in a single statement each.
          *
          * `clear(id)` is the same three resets, narrowed to one emitter: only
-         * bullets stamped with `id` are released, and only entries currently
-         * holding `id` have their cadence and snapshot guard reset. Bullets
-         * fired by an emitter whose id has since been retired are stamped with
-         * that retired id, so they are reachable by `clear(retiredId)` and
-         * unreachable by every other id — including the next one the field
-         * issues. That is the cross-emitter invariant: no emitter can destroy
-         * another emitter's bullets, and no successor inherits a predecessor's.
+         * bullets stamped with `id` are released (by the core), and only
+         * entries currently holding `id` have their cadence and snapshot
+         * guard reset. That is the cross-emitter invariant: no emitter can
+         * destroy another emitter's bullets, and no successor inherits a
+         * predecessor's.
          *
          * The reduced-motion budget is handled differently by the two forms,
          * and deliberately. Field-wide re-arms it outright — the snapshot is a
@@ -1307,46 +1296,23 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
          * frame anyway, so the refund is observable only under `reducedMotion`.
          *
          * Emitter ids are deliberately NOT reset by either form. `clear()`
-         * destroys bullets, not identities; the counter is monotonic for the
-         * life of the field.
+         * destroys bullets, not identities.
          *
          * @param emitterId - Restrict to one emitter. Omit to clear the field.
          * Pass `0` to clear exactly the anonymous `fireAt` bullets.
          */
         clear(emitterId?: number) {
+          const sim = propsRef.current.simulation;
+          if (sim) {
+            sim.clear(emitterId);
+            return;
+          }
           const mesh = meshRef.current;
           if (!mesh) return;
           const fieldWide = emitterId === undefined;
 
-          // ---- Release site 4 ----
-          // Walk `dense` BACKWARDS: swap-remove relocates the last live entry
-          // into the vacated position, and only a backwards walk is immune.
-          // (Skipping an entry is safe for the same reason: the relocated one
-          // always comes from an index above the cursor, already visited.)
-          // O(active), not O(maxBullets).
-          const bullets = bulletsRef.current;
-          const dense = denseRef.current;
-          let minSlot = 0;
-          let maxSlot = -1;
-          let released = 0;
-          for (let d = denseCountRef.current - 1; d >= 0; d--) {
-            const i = dense[d];
-            if (!fieldWide && bullets[i].emitterId !== emitterId) continue;
-            _dummy.position.set(0, -999, 0);
-            _dummy.scale.set(0, 0, 0);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(i, _dummy.matrix);
-            if (maxSlot < 0) {
-              minSlot = i;
-              maxSlot = i;
-            } else if (i < minSlot) {
-              minSlot = i;
-            } else if (i > maxSlot) {
-              maxSlot = i;
-            }
-            releaseSlot(i);
-            released++;
-          }
+          // ---- Release site 4 ---- O(active), not O(maxBullets).
+          const released = core.clear(emitterId);
 
           // Cadence and the reduced-motion snapshot belong to the emitters, so
           // clearing the field clears all of theirs — and the budget those
@@ -1368,139 +1334,100 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
           }
 
           syncMeshCount(mesh);
-          markMatrixDirty(mesh, minSlot, maxSlot);
+          markMatrixDirty(mesh, core._opMin, core._opMax);
         },
 
         /** Number of bullets currently alive, across every emitter. */
         get activeCount(): number {
-          return denseCountRef.current;
+          const sim = propsRef.current.simulation;
+          return sim ? sim.activeCount : core.activeCount;
         },
 
         /**
-         * How many live bullets carry `emitterId`.
-         *
-         * O(active) — it walks the sparse set's `dense` list, never the whole
-         * pool — and counts delayed bullets as well as visible ones, because a
-         * delayed bullet still occupies a slot. That is what makes it the right
-         * number to reason about the pool with, and the companion to
-         * `onPoolExhausted` for a consumer deciding whether to fire at all.
+         * How many live bullets carry `emitterId` — O(active), delayed bullets
+         * included, because a delayed bullet still occupies a slot.
          */
         activeCountFor(emitterId: number): number {
-          const bullets = bulletsRef.current;
-          const dense = denseRef.current;
-          let n = 0;
-          for (let d = denseCountRef.current - 1; d >= 0; d--) {
-            if (bullets[dense[d]].emitterId === emitterId) n++;
-          }
-          return n;
+          const sim = propsRef.current.simulation;
+          return sim ? sim.activeCountFor(emitterId) : core.activeCountFor(emitterId);
         },
 
         /**
          * Iterate active, visible bullets; consume any for which `cb` returns
-         * `true`. Delayed (not-yet-visible) bullets are skipped so a hit test
-         * never lands on a parked instance.
-         *
-         * **Reentrant.** `cb` may call `fireAt` — a retaliation shot from
-         * inside a hit test is exactly the case decision 1 was written around.
-         * The backwards walk makes it safe rather than lucky: a spawn appends
-         * to `dense` at an index at or above the cursor, which is only ever
-         * ground the walk has already covered, so a bullet fired mid-walk is
-         * never visited by that walk, never clobbers an unvisited entry, and
-         * carries the id it was fired with rather than the one being visited.
+         * `true`. Reentrant: `cb` may call `fireAt` (see the core's walk).
+         * Consumption hides the slot through the sink; the span is flushed
+         * once, after the walk.
          */
         forEachActive(cb) {
-          const bullets = bulletsRef.current;
-          const mesh = meshRef.current;
-          const dense = denseRef.current;
-          let minSlot = 0;
-          let maxSlot = -1;
-          // BACKWARDS — release site 3 consumes mid-walk, and swap-remove moves
-          // the last live entry down into the vacated position. A forward walk
-          // would skip one live bullet per consumption: a silent, load-dependent
-          // miss in the consumer's hit test.
-          for (let d = denseCountRef.current - 1; d >= 0; d--) {
-            const i = dense[d];
-            const b = bullets[i];
-            if (b.delay > 0) continue;
-            // `emitterId` is the fourth argument and therefore additive: a
-            // three-parameter callback written before provenance existed keeps
-            // compiling and keeps behaving identically.
-            if (cb(i, b.position, b.payload, b.emitterId) === true) {
-              releaseSlot(i);
-              if (mesh) {
-                _dummy.position.set(0, -999, 0);
-                _dummy.scale.set(0, 0, 0);
-                _dummy.updateMatrix();
-                mesh.setMatrixAt(i, _dummy.matrix);
-                if (maxSlot < 0) {
-                  minSlot = i;
-                  maxSlot = i;
-                } else if (i < minSlot) {
-                  minSlot = i;
-                } else if (i > maxSlot) {
-                  maxSlot = i;
-                }
-              }
-            }
+          const sim = propsRef.current.simulation;
+          if (sim) {
+            sim.forEachActive(cb);
+            return;
           }
-          if (mesh && maxSlot >= 0) {
+          core.forEachActive(cb);
+          const mesh = meshRef.current;
+          if (mesh && core._opMax >= 0) {
             syncMeshCount(mesh);
-            markMatrixDirty(mesh, minSlot, maxSlot);
+            markMatrixDirty(mesh, core._opMin, core._opMax);
           }
         },
 
         /**
          * Advance exactly `dt` seconds — manual mode only. Every refusal
-         * (auto mode, paused, unusable `dt`) is a no-op decided by
-         * `shouldStep`, never a throw. Uploads nothing itself: the step folds
-         * its writes into `_step` and the frame loop flushes once per frame.
+         * (auto mode, paused, unusable `dt`, an external simulation) is a
+         * no-op, never a throw. Uploads nothing itself: the step folds its
+         * writes into `_step` and the frame loop flushes once per frame.
          */
         step(dt: number) {
           const props = propsRef.current;
+          if (props.simulation) {
+            if (DEV && !_ext.warnedStep) {
+              _ext.warnedStep = true;
+              console.warn(
+                '[r3f-projectiles] step() was called on a <BulletField simulation={…}>; it is ' +
+                  'ignored. The simulation belongs to your code — call sim.step(dt) on it.',
+              );
+            }
+            return;
+          }
           if (!shouldStep(_step, props.stepMode, props.paused, dt)) return;
-          const mesh = meshRef.current;
           const advance = advanceRef.current;
-          if (!mesh || !advance) return;
-          advance(mesh, dt);
+          if (!meshRef.current || !advance) return;
+          advance(dt);
         },
 
-        /**
-         * Overwrite a live bullet's payload. `slotToDense` is `-1` for a free
-         * slot and `undefined` for an index outside the pool (or not an
-         * integer), so one negated comparison rejects all of them.
-         */
+        /** Overwrite a live bullet's payload; ignored for a slot not live. */
         setPayload(index: number, payload: number) {
-          if (!(slotToDenseRef.current[index] >= 0)) return;
-          bulletsRef.current[index].payload = payload;
+          const sim = propsRef.current.simulation;
+          if (sim) sim.setPayload(index, payload);
+          else core.setPayload(index, payload);
         },
       }),
-      [_dummy, _sourcePos, _spawnRange, _step, spawnBullets, releaseSlot, syncMeshCount],
+      [core, _sourcePos, _step, _ext, syncMeshCount],
     );
 
     useImperativeHandle(ref, () => handle, [handle]);
 
     // ---- Simulation step ---------------------------------------------------
     //
-    // One step of `dt` seconds: everything the frame loop did per frame before
-    // 0.5.0, minus the GPU flush and `onBulletCount`. The body is that loop's,
-    // in place — so "this frame" in the comments below means "this step", which
-    // in `'auto'` mode is the same thing.
+    // One step of `dt` seconds of the OWNED simulation: the emitters' half
+    // (reduced-motion snapshot, cadences, auto-fire), which lives here because
+    // emitters are components, then the core's half (delays, motion, life,
+    // culling, the fade write) — in the order the pre-0.6.0 loop ran them, so
+    // bullets an emitter fires this step are advanced by this step.
     //
     // Called once per frame by the frame loop in `'auto'` mode, and by the
     // handle's `step(dt)` in `'manual'` mode; `paused` and the `dt` clamp are
-    // the callers' business. It writes instance matrices on the CPU (that is
-    // the simulation's visible output, and it keeps the fade on simulation
-    // time) but never flags them for upload: the slot span it wrote is folded
-    // into `_step`, and the frame loop below uploads the union once per
-    // rendered frame however many steps ran.
+    // the callers' business. Matrices are written on the CPU through the
+    // core's sink but never flagged: the slot span is folded into `_step`, and
+    // the frame loop below uploads the union once per rendered frame however
+    // many steps ran.
     //
     // Nothing in here reads the renderer, the clock or the frame — only the
     // pool, the registry, the props and `dt`. That is the whole of the
-    // determinism guarantee: identical step/fire/consume sequences produce
-    // identical state, whatever the frame grouping.
-    const advance = useCallback((mesh: InstancedMeshType, dt: number): void => {
+    // determinism guarantee.
+    const advance = useCallback((dt: number): void => {
       const props = propsRef.current;
-      const bullets = bulletsRef.current;
       const entries = entriesRef.current;
 
       // ---- Reduced motion: spawn once per emitter, skip timer & rotation ----
@@ -1524,61 +1451,43 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
 
           // ---- Decision 5: the one deliberate behavioural divergence ----
           // Each emitter snapshots from ITS OWN origin, falling back to its own
-          // static `(0, spawnCenterY, 0)` — the same resolution `fire()` uses.
-          //
-          // `<BulletManager>` used to set the static centre unconditionally
-          // here, never reading `origin`, so a `<BulletManager origin={ref}
-          // reducedMotion>` snapshotted at the world origin rather than at the
-          // emitter. That is taken as a bug: an accessibility snapshot that
-          // draws a moving emitter's bullets somewhere the emitter is not is
-          // worse than useless, it is the only generalization that means
-          // anything at N>1, and it makes all three origin-resolution paths
-          // (fire, auto-fire, snapshot) agree for the first time.
+          // static `(0, spawnCenterY, 0)` — the same resolution `fire()` uses,
+          // so all three origin-resolution paths (fire, auto-fire, snapshot)
+          // agree. (Before 0.4.0 the snapshot ignored `origin`; see the
+          // changelog.)
           const originVec = entry.props.origin?.current;
           if (originVec) _sourcePos.copy(originVec);
           else _sourcePos.set(0, entry.props.spawnCenterY, 0);
-          const spawnData = resolvePattern(entry.props.pattern);
-          const requested = spawnData.length;
-          const n = spawnBullets(
-            mesh,
-            bullets,
+          const n = core._burst(
             _sourcePos,
-            spawnData,
-            true,
+            entry.props.pattern,
             entry.id,
+            true,
             budget,
           );
-          releaseSpawnData(spawnData);
           // A snapshot truncated by the field-wide 200 cap reports through the
-          // same callback as one truncated by a full pool. Decision 5 makes the
-          // budget behave as drop-newest in registration order precisely so
-          // exhaustion has one semantics here rather than two — but the two
-          // still want different remedies, so they are told apart by `reason`.
-          //
-          // This is the one path where either constraint can bind, and the two
-          // are distinguishable without asking the pool: `spawnBullets` checks
-          // its `cap` at the top of each iteration, before touching the free
-          // stack, so it can only return the whole budget by having been
-          // stopped BY the budget. Anything short of it means a slot was
-          // refused. When both would have bound, the budget is the proximate
-          // cause and is what gets reported.
+          // same callback as one truncated by a full pool, told apart by
+          // `reason`. The core checks `cap` before touching the free stack, so
+          // it can only return the whole budget by having been stopped BY the
+          // budget; anything short of it means a slot was refused. When both
+          // would have bound, the budget is the proximate cause.
           reportExhaustion(
             props.onPoolExhausted,
             entry.id,
-            requested,
+            core._lastRequested,
             n,
             n === budget ? 'reduced-motion-budget' : 'pool-full',
           );
           reducedMotionBudgetRef.current = budget - n;
           rmSpawned += n;
 
-          if (_spawnRange.max >= 0) {
+          if (core._opMax >= 0) {
             if (rmMax < 0) {
-              rmMin = _spawnRange.min;
-              rmMax = _spawnRange.max;
+              rmMin = core._opMin;
+              rmMax = core._opMax;
             } else {
-              if (_spawnRange.min < rmMin) rmMin = _spawnRange.min;
-              if (_spawnRange.max > rmMax) rmMax = _spawnRange.max;
+              if (core._opMin < rmMin) rmMin = core._opMin;
+              if (core._opMax > rmMax) rmMax = core._opMax;
             }
           }
         }
@@ -1595,8 +1504,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       // each emitter's own guard is reset in the service loop below.
       reducedMotionBudgetRef.current = REDUCED_MOTION_MAX;
 
-      // The slot span this frame wrote, folded across every emitter's spawn and
-      // the simulate loop so a single merged update range covers them all.
+      // The slot span this step wrote, folded across every emitter's spawn and
+      // the core's step so a single merged update range covers them all.
       let minSlot = 0;
       let maxSlot = -1;
       let spawnedThisFrame = 0;
@@ -1629,121 +1538,47 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
             );
           }
 
-          const spawnData = resolvePattern(ep.pattern);
-          const requested = spawnData.length;
-          const spawned = spawnBullets(
-            mesh,
-            bullets,
-            _sourcePos,
-            spawnData,
-            false,
-            entry.id,
-          );
+          const spawned = core._burst(_sourcePos, ep.pattern, entry.id, false);
           spawnedThisFrame += spawned;
-          releaseSpawnData(spawnData);
           // Once per burst, per emitter — never once per dropped bullet. The
           // reduced-motion budget is not in play on this path (it returns
           // above), so the pool is the only constraint that can bind.
           reportExhaustion(
             props.onPoolExhausted,
             entry.id,
-            requested,
+            core._lastRequested,
             spawned,
             'pool-full',
           );
 
-          if (_spawnRange.max >= 0) {
+          if (core._opMax >= 0) {
             if (maxSlot < 0) {
-              minSlot = _spawnRange.min;
-              maxSlot = _spawnRange.max;
+              minSlot = core._opMin;
+              maxSlot = core._opMax;
             } else {
-              if (_spawnRange.min < minSlot) minSlot = _spawnRange.min;
-              if (_spawnRange.max > maxSlot) maxSlot = _spawnRange.max;
+              if (core._opMin < minSlot) minSlot = core._opMin;
+              if (core._opMax > maxSlot) maxSlot = core._opMax;
             }
           }
         }
       }
 
-      // ---- Update all active bullets ----
-      const fadeCurveFn = props.fadeCurveFn; // already resolved at render time
-      const fadeSeconds = props.fadeTime;
-
-      // Bounds: a per-axis test against a cube of half-extent `boundsLimit` in
-      // the field's local space, centred on `boundsCenter` — read ONCE per step
-      // — or on the origin. With no centre the subtraction is `x - 0`, which is
-      // exactly `x` in IEEE arithmetic, so the default path is bit-identical
-      // to the pre-0.5.0 `Math.abs(x) > limit`. `Infinity` skips the test.
-      const limit = props.boundsLimit;
-      const cullBounds = limit !== Infinity;
-      const center = props.boundsCenter?.current;
-      const cx = center ? center.x : 0;
-      const cy = center ? center.y : 0;
-      const cz = center ? center.z : 0;
-
-      // O(active), not O(maxBullets). BACKWARDS, because the despawn branch
-      // below swap-removes from `dense` mid-walk.
-      const dense = denseRef.current;
-      for (let d = denseCountRef.current - 1; d >= 0; d--) {
-        const i = dense[d];
-        const b = bullets[i];
-
-        // Handle delay countdown
-        if (b.delay > 0) {
-          b.delay -= dt;
-          if (b.delay > 0) {
-            // Still waiting — keep hidden, and its matrix already says so
-            continue;
-          }
-          // Delay just ended — fall through to normal update
-        }
-
-        // Frame-rate independent physics
-        b.velocity.addScaledVector(b.acceleration, dt);
-        b.position.addScaledVector(b.velocity, dt);
-        b.life -= dt;
-
-        // Deactivate: lifetime expired or out of bounds
-        if (
-          b.life <= 0 ||
-          (cullBounds &&
-            (Math.abs(b.position.x - cx) > limit ||
-              Math.abs(b.position.y - cy) > limit ||
-              Math.abs(b.position.z - cz) > limit))
-        ) {
-          // ---- Release sites 1 (lifetime expiry) and 2 (out of bounds) ----
-          _dummy.position.set(0, -999, 0);
-          _dummy.scale.set(0, 0, 0);
-          _dummy.updateMatrix();
-          mesh.setMatrixAt(i, _dummy.matrix);
-          if (maxSlot < 0) {
-            minSlot = i;
-            maxSlot = i;
-          } else if (i < minSlot) {
-            minSlot = i;
-          } else if (i > maxSlot) {
-            maxSlot = i;
-          }
-          releaseSlot(i);
-          continue;
-        }
-
-        // Fade: scale down over the last `fadeTime` seconds, shaped by `fadeCurve`.
-        // Visual only — the despawn test above is the sole authority on lifetime.
-        //
-        // ---- Per-bullet scale, WRITE SITE 1 ----
-        // The bullet's own multiplier composes with the fade rather than
-        // replacing it, so a `mod.scale(3)` bullet fades from 3 to 0 exactly as
-        // a default one fades from 1 to 0.
-        const fade = fadeScale(b.life, fadeSeconds, fadeCurveFn);
-        const s = fade * b.scale;
-        writer.write(mesh, i, b.position, b.velocity, s);
+      // ---- Update all active bullets: the core's step ----
+      // Config is pushed in from the current props at step time — the moment
+      // the pre-0.6.0 loop read them — so a prop change lands on the first
+      // step after its render, as it always has.
+      core.boundsLimit = props.boundsLimit;
+      core.boundsCenter = props.boundsCenter;
+      core.fadeTime = props.fadeTime;
+      core.fadeCurve = props.fadeCurveFn; // already resolved at render time
+      core._advance(dt);
+      if (core._opMax >= 0) {
         if (maxSlot < 0) {
-          minSlot = i;
-          maxSlot = i;
-        } else if (i < minSlot) {
-          minSlot = i;
-        } else if (i > maxSlot) {
-          maxSlot = i;
+          minSlot = core._opMin;
+          maxSlot = core._opMax;
+        } else {
+          if (core._opMin < minSlot) minSlot = core._opMin;
+          if (core._opMax > maxSlot) maxSlot = core._opMax;
         }
       }
 
@@ -1751,17 +1586,18 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       // Folded, not flushed: the frame loop uploads the union of every step
       // since the last frame in one range.
       foldPendingRange(_step, minSlot, maxSlot);
-      // `instanceColor` is written ONLY at spawn, never in this loop, so a
+      // `instanceColor` is written ONLY at spawn, never in the step, so a
       // step that spawned nothing has nothing to upload.
       if (spawnedThisFrame > 0) _step.colors = true;
       _step.stepped = true;
-    }, [_dummy, _sourcePos, _spawnRange, _step, spawnBullets, releaseSlot, writer]);
+    }, [core, _sourcePos, _step]);
     advanceRef.current = advance;
 
     // ---- Frame loop --------------------------------------------------------
     //
-    // `'auto'`: one clamped step, then the flush — the pre-0.5.0 frame, split
-    // in two. `'manual'`: the flush alone; `step(dt)` did the simulating.
+    // External simulation: one sync of its dirty range, and nothing else.
+    // Owned, `'auto'`: one clamped step, then the flush. Owned, `'manual'`:
+    // the flush alone; `step(dt)` did the simulating.
     //
     // The flush is unconditional and cheap when idle: `syncMeshCount` is
     // idempotent (every path that moves the sparse set already ends in it),
@@ -1772,9 +1608,36 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
 
       const props = propsRef.current;
 
+      const sim = props.simulation;
+      if (sim) {
+        let alpha = -1;
+        if (props.interpolate) {
+          if (sim.interpolation) {
+            alpha = props.interpolate();
+            if (!(alpha <= 1)) alpha = 1; // also catches NaN: draw the current state
+            else if (alpha < 0) alpha = 0;
+          } else if (DEV && !_ext.warnedInterpolate) {
+            _ext.warnedInterpolate = true;
+            console.warn(
+              '[r3f-projectiles] <BulletField interpolate> needs a simulation created with ' +
+                '{ interpolation: true }; drawing the latest step instead.',
+            );
+          }
+        }
+        syncExternal(mesh, sim, writer, _dummy, _tempColor, _lerp, alpha, _ext.full);
+        _ext.full = false;
+
+        const steps = sim.stepCount;
+        if (steps !== _ext.lastStepCount) {
+          _ext.lastStepCount = steps;
+          if (props.onBulletCount) props.onBulletCount(sim.activeCount);
+        }
+        return;
+      }
+
       // Respect paused prop; manual mode never steps from here.
       if (props.stepMode !== 'manual' && !props.paused) {
-        advance(mesh, Math.min(delta, 0.1)); // clamp to prevent spiral-of-death
+        advance(Math.min(delta, 0.1)); // clamp to prevent spiral-of-death
       }
 
       // ---- Batch GPU buffer updates (ONCE per rendered frame, never per step)
@@ -1790,8 +1653,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       // Only on a frame that animated: never while paused, never for a
       // reduced-motion snapshot, never on a manual frame with no step.
       if (stepped && props.onBulletCount) {
-        // Every survivor is still in `dense`; every despawn left it.
-        props.onBulletCount(denseCountRef.current);
+        props.onBulletCount(core.activeCount);
       }
     });
 
@@ -1833,7 +1695,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         <>
           <instancedMesh
             ref={meshRef}
-            args={[undefined, undefined, maxBullets]}
+            args={[undefined, undefined, capacity]}
             frustumCulled={false}
           >
             {geometry ? (

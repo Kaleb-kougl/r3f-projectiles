@@ -1,5 +1,5 @@
 import { Vector3 } from 'three';
-import type { BulletSpawnData } from './types';
+import type { BulletSpawnData } from './patternTypes';
 
 // ---------------------------------------------------------------------------
 // Module-scope pool

@@ -29,11 +29,12 @@ export default function App() {
 - **Aimable**: `gen.arc` fires a directional cone that widens continuously into a full ring, and `origin` lets a moving emitter shoot from wherever it currently is.
 - **Yours to Collide**: `forEachActive` walks live bullets so hit detection stays in your code, and an opaque `payload` integer carries whatever per-bullet state the library shouldn't know about — packed into named bitfields with `definePayload` if you need more than one number.
 - **Fixed-Step Ready**: `stepMode="manual"` takes the simulation off the render clock. Your fixed-timestep loop calls `step(dt)`; the field uploads once per frame. Same inputs, same bullets — bit for bit, however the steps fall into frames.
+- **Headless When You Need It**: `createBulletSimulation()` from the React-free `/core` entry is the bullet simulation itself — the very code `<BulletField>` runs — with no React, renderer or DOM. Step it from your own fixed tick, replay it in a plain function, hash it for desync checks, and draw it with `<BulletField simulation={sim} />`. See [Headless simulation](#headless-simulation-games-with-a-fixed-tick).
 - **Near-Zero Allocation**: I create scratch `Object3D`, `Vector3`, and `Color` objects once and reuse them every frame, so nothing is allocated per bullet. Three per-burst/per-flush exceptions are named under [Near-Zero-Allocation Render Loop](#near-zero-allocation-render-loop). No garbage collection spikes.
 - **Object Pooling**: `acquire()` and `releaseSpawnData()` recycle object state to eliminate allocation pressure.
 - **Shaped, Aimed, Outlined**: Swap the sphere for any geometry (`bulletGeometry.arrow()`, a textured sprite quad, your own mesh), point each bullet along its velocity or at the camera with `orient`, and draw a readable dark rim with `outline` — one extra draw call, no extra per-bullet work.
 - **Accessibility Built-In**: Use `reducedMotion` to render a static, zero-velocity snapshot for motion-sensitive users.
-- **Tree-Shakeable**: Import raw pattern math from `@k9kbdev/r3f-projectiles/patterns`. Leave React behind if you don't need it.
+- **Tree-Shakeable**: Import raw pattern math from `@k9kbdev/r3f-projectiles/patterns` and the headless simulation from `@k9kbdev/r3f-projectiles/core`. Leave React behind if you don't need it.
 - **TypeScript Native**: Shipped with complete type definitions.
 
 ---
@@ -51,6 +52,8 @@ npm install @k9kbdev/r3f-projectiles
 | `react` | `≥ 18` |
 | `@react-three/fiber` | `≥ 8` |
 | `three` | `≥ 0.150` |
+
+The React-free entries (`/core`, `/patterns`) load only `three` at run time. The package still declares React and R3F as peers, so npm installs them alongside it, but nothing on those entries ever imports them — a headless replay or a server can use them without a DOM or a renderer.
 
 ---
 
@@ -220,7 +223,9 @@ Two emitters, one `<instancedMesh>`, one pool, one `useFrame`. The material is a
 | `geometry` | `BufferGeometry` | sphere | Bullet shape, unit-sized, forward +X, up +Y. **Never disposed by the field.** See [Bullet geometry](#bullet-geometry). |
 | `orient` | `'none' \| 'velocity' \| 'camera'` | `'none'` | Rotate each bullet along its velocity, or billboard it to the camera. See [Orientation](#orientation). |
 | `outline` | `{ color, width, mode? }` | — | A uniform-color rim behind every bullet, from a second mesh sharing this field's instance matrices. See [Outlines](#outlines). |
-| `children` | `ReactNode` | — | The field's `<Emitter>` elements. |
+| `simulation` | `BulletSimulation` | — | Render a simulation **you own** (from `createBulletSimulation`) instead of running one. The field then never steps, spawns or culls; it syncs matrices once per frame. Simulation props (`maxBullets`, `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `paused`, `reducedMotion`, `stepMode`, `onPoolExhausted`) are ignored and `<Emitter>` children throw. See [Rendering a simulation you own](#rendering-a-simulation-you-own-bulletfield-simulation). |
+| `interpolate` | `() => number` | — | With `simulation` (created with `interpolation: true`): the fraction of a step to draw between the last two steps, read once per frame. |
+| `children` | `ReactNode` | — | The field's `<Emitter>` elements. Not allowed with `simulation`. |
 
 #### `<Emitter>` props
 
@@ -232,7 +237,7 @@ Two emitters, one `<instancedMesh>`, one pool, one `useFrame`. The material is a
 | `spawnCenterY` | `number` | `3` | Y-coordinate of this emitter's static spawn centre. |
 | `rotationSpeed` | `number` | `0.3` | Radians/second for this emitter's orbit, used only when `origin` is omitted. |
 
-Each emitter keeps its own cadence, its own orbit phase, and its own reduced-motion snapshot. An `<Emitter>` rendered outside a `<BulletField>` throws during render, so the mistake points at the offending JSX instead of producing an emitter that silently never fires.
+Each emitter keeps its own cadence, its own orbit phase, and its own reduced-motion snapshot. An `<Emitter>` rendered outside a `<BulletField>` — or inside one that renders an external [`simulation`](#rendering-a-simulation-you-own-bulletfield-simulation), which nothing in the field steps — throws during render, so the mistake points at the offending JSX instead of producing an emitter that silently never fires.
 
 Pass an `<Emitter>` a `ref` for `fire()` — one burst, right now. It is deliberately *not* the operation the frame loop performs, and the differences are the ones `<BulletManager>.fire()` has always had: it fires from this emitter's `origin`, falling back to a static `(0, spawnCenterY, 0)` rather than the orbit; it advances neither the cadence timer nor the orbit phase; and it works while the field is `paused`.
 
@@ -396,6 +401,8 @@ Attach a `ref` to `<BulletField>` for the imperative surface. These nine members
 | `step(dt)` | `(dt: number) => void` | Advance the simulation exactly `dt` seconds. `stepMode="manual"` only — a no-op (with a one-time dev warning) in `'auto'`. See [Manual stepping](#manual-stepping-stepmodemanual). |
 | `setPayload(i, payload)` | `(index: number, payload: number) => void` | Overwrite a live bullet's payload — the write-back half of `forEachActive`. Ignored for a slot that is not live. See [Payload bitfields](#payload-bitfields-definepayload). |
 
+On a field rendering an external `simulation`, every member forwards to that simulation except `step(dt)`, which is a no-op (with one development warning) — the simulation's owner steps it.
+
 `clear()` field-wide resets every registered emitter's cadence timer and re-arms every reduced-motion snapshot. `clear(id)` narrows all of that to one emitter: only bullets stamped with `id` are released, and only that emitter's cadence and snapshot are reset. Every other emitter's bullets are untouched — no emitter can destroy another emitter's bullets, by any route, which is what lets a hundred archers share one pool without reasoning about each other.
 
 Bullets fired by an emitter whose id has since been retired are still stamped with that retired id, so they remain reachable by `clear(retiredId)` and unreachable by every other id, including the next one the field issues.
@@ -451,7 +458,7 @@ What changes, and what does not:
 
 - **Upload is once per rendered frame, not once per step.** A step writes instance matrices on the CPU and flags nothing; the field's frame callback uploads the union of every slot written since the previous frame, once. Five steps in one frame cost one `needsUpdate` and one `addUpdateRange` record. Matrix *composition* is still per step, so it is CPU work proportional to steps × live bullets.
 - **Call `step()` before the field's frame callback** — from a `useFrame` with a negative priority as above, or from outside R3F's loop entirely. A step taken after the field's callback has run is uploaded on the next frame: one frame late, never lost.
-- **No interpolation.** A frame shows the state after the latest step. Rendering faster than you step shows bullets moving in step-sized increments, exactly as your other fixed-step entities do unless you interpolate them.
+- **No interpolation here.** A frame shows the state after the latest step. Rendering faster than you step shows bullets moving in step-sized increments, exactly as your other fixed-step entities do unless you interpolate them. A [simulation you own](#headless-simulation-games-with-a-fixed-tick) can be drawn interpolated, through `<BulletField simulation interpolate>`.
 - **`dt` is used as given.** The 0.1 s clamp is the auto loop's, applied to a frame's `delta`; in manual mode your accumulator owns the clock. An emitter fires at most once per step (as it fires at most once per frame in auto mode), so a `fireRate` above your step rate is effectively capped at one shot per step.
 - **`fire()` and `fireAt()` are unchanged.** They spawn immediately, at the current simulation time, in either mode.
 - **The fade follows simulation time**, because it is computed from each bullet's remaining `life` — so a frame with no step shows no fade progress.
@@ -467,9 +474,171 @@ Given the same sequence of `step(dt)` calls, `fire()` / `fireAt()` calls, `forEa
 What that claim rests on, stated rather than implied:
 
 - **Your inputs have to be identical too.** `origin` refs and `boundsCenter` are read at step time, so update them inside your fixed step, not in a render-rate callback. Prop changes (`fireRate`, `pattern`, `boundsLimit`) take effect at the first step after React commits them, which is a render-timing input — anything cadence-critical belongs in your own fixed step, through `fireAt`.
-- **Patterns have to be deterministic.** `gen.galaxy` and `gen.rose3D` — and so the built-in `'galaxy'` and `'rose3D'` presets — call `Math.random()`. Replace them with a factory driven by your own seeded generator.
+- **Patterns have to be deterministic.** `gen.galaxy` and `gen.rose3D` — and so the built-in `'galaxy'` and `'rose3D'` presets — call `Math.random()` by default. Both take an optional last argument, `rng: () => number`: pass `createSeededRandom(seed)` (exported from the root, `/patterns` and `/core`) and they replay exactly. The presets themselves stay random.
 - **Same engine, same platform.** `+ − × ÷` are exactly rounded IEEE-754 double operations in every conforming JavaScript engine. The `Math` functions are not: the spec leaves them implementation-approximated, and while `Math.sqrt` is correctly rounded in practice everywhere, `Math.sin`, `Math.cos`, `Math.atan2`, `Math.pow` and friends genuinely differ between engines, engine versions, and CPU architectures. The built-in orbit and most generators use them. So bit-identical holds within one browser/runtime build on one platform — a replay on the machine that recorded it, or peers on the same browser — and is **not** a promise across Chrome vs Firefox vs Safari. Cross-engine lockstep needs authoritative state sync on top.
 - **It is a claim about simulation state, not pixels.** Positions are doubles; the GPU receives float32 instance matrices.
+
+---
+
+### Headless simulation (games with a fixed tick)
+
+Manual stepping takes the clock away from the renderer, but the simulation still lives inside a React component. That stops working the moment gameplay has to run where React does not: a replay check that re-runs thousands of recorded ticks in a plain function and compares a state hash, a co-op peer running the same simulation, a dedicated server, a unit test. Keeping a second bullet simulation for those would mean two implementations to keep in step — and a desync the first time they disagree.
+
+`createBulletSimulation()` is the bullet simulation and nothing else: the slot pool, spawning (offsets, `mod.sequence` delays, life, payload, scale, color), acceleration and motion, expiry, bounds culling, emitter ids, consumption through `forEachActive`, and the fade bookkeeping a renderer reads. It imports `three`'s `Vector3` and `Color` and no React, no renderer, no DOM — from the `/core` entry or the package root. It is **not** a port: an owned `<BulletField>` runs this exact code for its own bullets, and a test plays one script into an owned manual-mode field and into a headless simulation and checks they end with the same bullets in the same slots, double for double.
+
+```ts
+// game/sim.ts — plain TypeScript. Runs in the browser, in a worker, in Node.
+import { Vector3 } from 'three';
+import { createBulletSimulation, type BulletSimulation } from '@k9kbdev/r3f-projectiles/core';
+import { gen, mod, compose, definePayload, createSeededRandom } from '@k9kbdev/r3f-projectiles/patterns';
+
+export const STEP = 1 / 60;
+const Shot = definePayload({ damage: 8, pierce: 3 });
+
+export interface Game {
+  bullets: BulletSimulation;
+  rng: () => number;
+  boss: { pos: Vector3; emitterId: number; cooldown: number };
+  player: { pos: Vector3; hp: number };
+}
+
+export function createGame(seed: number): Game {
+  const bullets = createBulletSimulation({ maxBullets: 4000, boundsLimit: 40, interpolation: true });
+  return {
+    bullets,
+    rng: createSeededRandom(seed),
+    boss: { pos: new Vector3(0, 0, -4), emitterId: bullets.acquireEmitter(), cooldown: 0 },
+    player: { pos: new Vector3(), hp: 100 },
+  };
+}
+
+/** One fixed tick. Depends on nothing but the game state and this tick's input. */
+export function tick(game: Game, input: { dx: number; dz: number }): void {
+  game.player.pos.x += input.dx * 6 * STEP;
+  game.player.pos.z += input.dz * 6 * STEP;
+
+  game.boss.cooldown -= STEP;
+  if (game.boss.cooldown <= 0) {
+    game.boss.cooldown = 0.4;
+    game.bullets.fireAt(
+      game.boss.pos,
+      () => compose(
+        gen.galaxy(24, 1, 3, 2, game.rng),               // seeded: replays exactly
+        mod.payload(Shot.pack({ damage: 10, pierce: 1 })),
+      ),
+      game.boss.emitterId,
+    );
+  }
+
+  game.bullets.step(STEP);
+
+  game.bullets.forEachActive((i, pos, payload) => {
+    if (pos.distanceToSquared(game.player.pos) > 0.25) return;
+    game.player.hp -= Shot.get(payload, 'damage');
+    const pierce = Shot.get(payload, 'pierce');
+    if (pierce === 0) return true;                       // consume
+    game.bullets.setPayload(i, Shot.with(payload, 'pierce', pierce - 1));
+  });
+}
+
+export function hashGame(game: Game): number {
+  let h = game.bullets.hashState();                       // every live bullet, exact bits
+  h = Math.imul(h ^ game.player.hp, 0x01000193);          // …then fold in the rest of your state
+  return h >>> 0;
+}
+```
+
+```ts
+// game/replay-check.ts — no React, no canvas: thousands of ticks in a loop.
+export function replayCheck(seed: number, inputs: { dx: number; dz: number }[], expected: number) {
+  const game = createGame(seed);
+  for (const input of inputs) tick(game, input);
+  return hashGame(game) === expected;
+}
+```
+
+```tsx
+// Bullets.tsx — the same simulation, drawn.
+import { useRef } from 'react';
+import { useFrame } from '@react-three/fiber';
+import { BulletField, bulletGeometry } from '@k9kbdev/r3f-projectiles';
+import { STEP, tick, type Game } from './game/sim';
+import { readInput } from './input';
+
+const arrow = bulletGeometry.arrow();
+
+export function Bullets({ game }: { game: Game }) {
+  const acc = useRef(0);
+
+  // Negative priority: the ticks land before the field's own frame callback
+  // syncs, so this frame shows them.
+  useFrame((_state, delta) => {
+    acc.current += Math.min(delta, 0.25);
+    while (acc.current >= STEP) {
+      acc.current -= STEP;
+      tick(game, readInput());
+    }
+  }, -1);
+
+  return (
+    <BulletField
+      simulation={game.bullets}
+      geometry={arrow}
+      bulletRadius={0.25}
+      orient="velocity"
+      outline={{ color: '#120018', width: 0.04 }}
+      interpolate={() => acc.current / STEP}
+    />
+  );
+}
+```
+
+#### `BulletSimulation`
+
+| Member | Type | Description |
+|---|---|---|
+| `step(dt)` | `(dt: number) => void` | Advance exactly `dt` seconds — the same step `<BulletField>`'s manual `step(dt)` takes, minus `<Emitter>` cadences. Unclamped. A `dt` that is not a finite number `> 0` is ignored (dev warning for `NaN`/negative/infinite). |
+| `fireAt(origin, pattern, emitterId?)` | `(origin: Vector3Like, pattern: PatternKey \| PatternFactory, emitterId?: number) => number` | Spawn one burst; returns how many landed. `origin` is copied. Raises `onPoolExhausted` once if the pool came up short. |
+| `acquireEmitter()` / `releaseEmitter(id)` | `() => number` / `(id: number) => void` | Ids from `1`, never recycled; release clears nothing. Same contract as the field's. |
+| `clear(emitterId?)` | `(emitterId?: number) => number` | Free all bullets, or one emitter's (`0` = anonymous). Returns how many. |
+| `activeCount` / `activeCountFor(id)` | `number` / `(id: number) => number` | Live bullets, delayed ones included. |
+| `forEachActive(cb)` | `(cb: (i, pos, payload, emitterId) => boolean \| void) => void` | Walk live, visible bullets; return `true` to consume. Reentrant for `fireAt` and `setPayload`. |
+| `setPayload(i, payload)` | `(index: number, payload: number) => void` | Write-back half of `forEachActive`. Ignored for a slot that is not live. |
+| `writeStateHash(out)` | `(out: number[]) => void` | Append `index, x, y, z, vx, vy, vz, life, payload, emitterId` for every live bullet, ascending slot order. Feed it to your own hash. |
+| `hashState()` | `() => number` | A 32-bit hash over the exact bits of the same values (plus the live count). For replay checks and desync detection; not cryptographic. |
+| `stepCount` | `number` | Steps taken. A free tick counter. |
+| `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `onPoolExhausted` | mutable | As the options; read at step time. `boundsCenter` takes a `{ current }` ref, a getter, or a live vector. |
+| `capacity`, `interpolation` | `number`, `boolean` | Fixed at creation. |
+| `highWater`, `isLive(i)`, `isVisible(i)`, `positionAt(i)`, `velocityAt(i)`, `previousPositionAt(i, out)`, `lifeAt(i)`, `delayAt(i)`, `payloadAt(i)`, `emitterIdAt(i)`, `scaleAt(i)`, `fadeAt(i)`, `colorAt(i, out)` | read access | Per-slot state for a renderer, unvalidated and allocation-free. |
+| `dirtyMin`, `dirtyMax`, `spawnedSinceSync(i)`, `markSynced()` | render sync | The slot span whose render state changed since the last `markSynced()`, and which slots were (re)spawned. `<BulletField simulation>` consumes these once per frame. |
+
+Options: `maxBullets` (default `2000`, fixed), `boundsLimit` (`25`), `boundsCenter`, `fadeTime` (`1` — bookkeeping only, it never kills a bullet), `fadeCurve` (`'linear'`), `interpolation` (`false`), `onPoolExhausted`.
+
+#### Rendering a simulation you own (`<BulletField simulation>`)
+
+Given a `simulation`, a field stops being a simulation and becomes a renderer of yours. Once per rendered frame it writes the simulation's dirty slot range — colors for bullets spawned since the last frame, a parked matrix for freed and delayed slots, and for every visible bullet its position, scaled by `scale × fade`, through the same instance writer an owned field uses — and uploads it in one `needsUpdate` and one `addUpdateRange`. `geometry`, `orient`, `outline`, `material` and `bulletRadius` work exactly as they do on an owned field; a test draws one script both ways and compares the instance and color buffers byte for byte.
+
+The rules all follow from "the simulation is yours":
+
+- **The field never steps, spawns into or culls it.** Frames alone change nothing. The handle forwards everything to the simulation except `step(dt)`, which is a no-op with one development warning.
+- **The simulation's own options govern it.** `maxBullets` (the mesh is sized from `simulation.capacity`), `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `paused`, `reducedMotion`, `stepMode` and `onPoolExhausted` are ignored, with one development warning naming any you passed.
+- **`<Emitter>` children throw during render.** Nothing would ever service their cadence. Cadence belongs to your tick: `fireAt` from it, as above.
+- **One renderer per simulation.** The sync consumes the dirty range (`markSynced`). Two fields drawing one simulation would each miss what the other consumed.
+- **Step before the field's frame callback** — a negative-priority `useFrame`, as above, or outside R3F's loop. A tick that lands after it is drawn one frame late, never lost.
+- **`onBulletCount`** is raised once per rendered frame in which the simulation stepped.
+- **Swapping `simulation`** for another redraws every live bullet on the next frame. Switching a field between owning and rendering resets the field's own pool; give it a `key` if you would rather remount.
+
+**Interpolation.** Create the simulation with `interpolation: true` and pass `interpolate={() => alpha}`, where `alpha` is the fraction of a step your accumulator has banked (`acc / STEP`). Each bullet is then drawn at `previous + (current − previous) × alpha` — one tick behind, the standard fixed-timestep trade, with no step-sized stutter on a 144 Hz display. It is position only (the fade and `orient="velocity"` follow the latest step), it rewrites every slot up to the high-water mark each frame because the in-between point moves even when no step ran, and it allocates nothing. Without `interpolation: true` on the simulation the prop is ignored with one development warning.
+
+#### Why emitters stay in React
+
+`<Emitter>` cadence, the built-in orbit and the reduced-motion snapshot stay in `<BulletField>`; the core has `fireAt` and nothing like a registered emitter. A game with a fixed tick already owns cadence — it is gameplay state that belongs in its own hash, next to the boss that fires — and a second, library-owned timer would be one more thing to serialize and to keep in lockstep. The core stays a pure function of the calls you make. An owned field services its emitters and then steps the core, in the order the 0.5.0 loop always did, so nothing about `<Emitter>` changed.
+
+#### What determinism covers here
+
+Everything under [Deterministic stepping](#deterministic-stepping) applies, with the simulation in place of the field: the same options and the same sequence of `step`, `fireAt`, `clear`, `forEachActive` consumptions, `setPayload`, `acquireEmitter`/`releaseEmitter` and config writes give bit-identical state — tested with two simulations, and with one rendered under four frame groupings (interpolated, at that) against one never rendered at all. Rendering never feeds back. Seed `gen.galaxy` / `gen.rose3D` with `createSeededRandom`, keep `Math.sin`-based patterns to one engine build, and read `origin`s and `boundsCenter` from your tick, not from a render callback.
+
+Not here yet, stated rather than implied: there is **no `snapshot()` / `restore()`** — a rollback netcode that rewinds the simulation has to re-simulate from a known input, not restore a saved pool — and **capacity is fixed** at creation.
 
 ---
 
@@ -500,9 +669,9 @@ Generators yield pool-acquired `BulletSpawnData` arrays. Call `releaseSpawnData(
 |---|---|---|
 | `gen.fibonacciSphere` | `(count, radius)` | Golden-angle sphere distribution. |
 | `gen.torusKnot` | `(count, p?, q?, radius?)` | Parametric torus knot (`p=2, q=3, radius=2`). |
-| `gen.galaxy` | `(count, radius?, arms?, spin?)` | Spiral-arm galaxy (`radius=4, arms=3, spin=2`). |
+| `gen.galaxy` | `(count, radius?, arms?, spin?, rng?)` | Spiral-arm galaxy (`radius=4, arms=3, spin=2`). Random unless you pass a seeded `rng`. |
 | `gen.helix` | `(count, radius?, height?, turns?)` | Helix spiral (`radius=2, height=4, turns=2`). |
-| `gen.rose3D` | `(count, k?, radius?)` | 3D rose/rhodonea curve (`k=4, radius=2`). |
+| `gen.rose3D` | `(count, k?, radius?, rng?)` | 3D rose/rhodonea curve (`k=4, radius=2`). Random unless you pass a seeded `rng`. |
 | `gen.ring` | `(count, speed?, radius?)` | Flat expanding ring (`speed=2, radius=0`). |
 | `gen.arc` | `(count, spread?, speed?, heading?, radius?)` | Flat directional arc (`spread=π/4, speed=2, heading=0, radius=0`). |
 
@@ -988,6 +1157,8 @@ Under `stepMode="manual"` the same loop body runs inside `step(dt)` and makes th
 
 The 0.5.0 render options keep that: `orient="velocity"` computes its rotation from scalars into one scratch quaternion and keeps each bullet's last heading in a `Float32Array` allocated once per pool size, `orient="camera"` reads the camera once per frame, and the outline adds no per-bullet work at all. A test counts every three.js object the library's own code constructs across 20 frames of 2,000 moving bullets, in every mode, and expects zero.
 
+Since 0.6.0 the simulation half of that loop lives in the headless core (`createBulletSimulation`); an owned `<BulletField>` drives one, and its render sink writes each matrix at exactly the points the field always did — the same slots, the same values, the same count per step. A headless simulation with no field composes no matrices at all: a step is motion, life and culling over the live set, about 12 ns per bullet on the machine the test suite runs on.
+
 A sparse set over the slot pool keeps the loop proportional to the bullets that are actually alive: acquiring and releasing a slot are `O(1)`, and the frame loop, `clear()`, `activeCount`, and `forEachActive` are `O(active)` rather than `O(maxBullets)`.
 
 ### Object Pooling
@@ -1031,8 +1202,11 @@ The snapshot is taken at the emitter's `origin` when one is supplied, and at `(0
 Access the raw pattern math as a standalone module independent of React and R3F:
 
 ```ts
-import { gen, mod, compose, definePayload } from '@k9kbdev/r3f-projectiles/patterns';
+import { gen, mod, compose, definePayload, createSeededRandom } from '@k9kbdev/r3f-projectiles/patterns';
+import { createBulletSimulation } from '@k9kbdev/r3f-projectiles/core';
 ```
+
+Both entries are React- and R3F-free *as built* — a test bundles the package with its own config and checks everything `core.js`, `core.cjs` and `core.d.ts` load, transitively, is `three` and nothing else.
 
 ---
 

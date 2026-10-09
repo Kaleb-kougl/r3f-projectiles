@@ -1,5 +1,5 @@
 import { gen, mod, compose } from './patterns';
-import type { BulletSpawnData, PatternKey, PatternFactory } from './types';
+import type { BulletSpawnData, PatternKey, PatternFactory } from './patternTypes';
 
 // ---------------------------------------------------------------------------
 // Built-in presets
