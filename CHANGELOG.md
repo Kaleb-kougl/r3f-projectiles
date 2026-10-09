@@ -125,7 +125,7 @@ with the package's tsup config and checks that everything `core.js`, `core.cjs` 
 
 ---
 
-## Unreleased (0.5.0)
+## 0.5.0 — 2026-10-09
 
 ### Simulation: manual stepping, bounds options, payload helpers
 
