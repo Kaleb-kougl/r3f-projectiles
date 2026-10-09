@@ -13,8 +13,12 @@ import {
   Color,
   Vector3,
   DynamicDrawUsage,
+  type BufferGeometry,
   type InstancedMesh as InstancedMeshType,
 } from 'three';
+import { useBulletRender } from './render/useBulletRender';
+import type { BulletOrient } from './render/orient';
+import type { BulletOutline } from './render/outline';
 import { resolvePattern } from './presets';
 import { resolveEasing, fadeScale } from './easing';
 import { releaseSpawnData } from './pool';
@@ -165,7 +169,7 @@ interface BulletState {
 
 /**
  * Props for the public `<Emitter>` component — the five of `<BulletManager>`'s
- * fourteen that describe an emitter rather than the field.
+ * seventeen that describe an emitter rather than the field.
  *
  * All optional, and the defaults are applied by `<Emitter>` itself. They are
  * the same values `<BulletManager>` has always documented, and they now live in
@@ -512,6 +516,33 @@ export interface BulletFieldProps {
    */
   material?: ReactNode;
   /**
+   * Bullet geometry, replacing the default `<sphereGeometry args={[bulletRadius,
+   * 6, 6]} />`. See `bulletGeometry` for ready-made flat shapes.
+   *
+   * **Convention:** forward is local +X (what `orient="velocity"` aims), up is
+   * local +Y (flat shapes lie in XZ facing +Y), and the shape is authored at
+   * unit size — it is scaled by `bulletRadius`, and per bullet by `mod.scale`,
+   * through the instance matrix.
+   *
+   * **Ownership stays with you.** The field attaches it and never disposes it,
+   * on unmount or when the prop changes — so one geometry can be shared by any
+   * number of fields, and you dispose it when you are done with it. Only the
+   * default sphere, which the field creates, is the field's to dispose.
+   */
+  geometry?: BufferGeometry;
+  /**
+   * How each instance is rotated: `'none'` (today's behaviour), `'velocity'`
+   * (local +X along the bullet's current velocity) or `'camera'` (billboard,
+   * local +Y toward the camera). See {@link BulletOrient}. @default 'none'
+   */
+  orient?: BulletOrient;
+  /**
+   * A uniform-color rim drawn behind every bullet, by a second instanced mesh
+   * sharing this field's `instanceMatrix` and `count` — one extra draw call and
+   * no extra per-bullet CPU work. See {@link BulletOutline}. Omit for none.
+   */
+  outline?: BulletOutline;
+  /**
    * The field's emitters — `<Emitter>` elements, which render nothing and
    * register themselves through the registry context this component provides.
    * Service order is registration order, which is mount order, which is the
@@ -613,6 +644,9 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       onBulletCount,
       onPoolExhausted,
       material,
+      geometry,
+      orient = 'none',
+      outline,
       children,
     },
     ref,
@@ -704,6 +738,17 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       }),
       [],
     );
+
+    // ---- Render options (geometry / orient / outline) ----------------------
+    // Composes every matrix that SHOWS a bullet (both write sites below), and
+    // owns the camera sync and the outline mesh. Stable for the field's life.
+    const writer = useBulletRender(meshRef, {
+      maxBullets,
+      bulletRadius,
+      geometry,
+      orient,
+      outline,
+    });
 
     // ---- Sparse-set operations (stable identity, close over the refs) ------
     const { acquireSlot, releaseSlot, syncMeshCount } = useMemo(
@@ -876,6 +921,10 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
           _tempColor.set(data.color ?? 0xff3333);
           mesh.setColorAt(slotIdx, _tempColor);
 
+          // Fresh heading for a recycled slot (orient="velocity" only), from
+          // the PATTERN's velocity so a zero-velocity snapshot still aims.
+          writer.prime(slotIdx, data.velocity);
+
           // If no delay, position immediately; otherwise hide at -999.
           //
           // ---- Per-bullet scale, WRITE SITE 2 ----
@@ -887,11 +936,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
           // permanent no-op in exactly the accessibility snapshot that has no
           // animation to convey size any other way.
           if (bullet.delay <= 0) {
-            const s = bullet.scale;
-            _dummy.position.copy(bullet.position);
-            _dummy.scale.set(s, s, s);
-            _dummy.updateMatrix();
-            mesh.setMatrixAt(slotIdx, _dummy.matrix);
+            writer.write(mesh, slotIdx, bullet.position, bullet.velocity, bullet.scale);
           } else {
             _dummy.position.set(0, -999, 0);
             _dummy.scale.set(0, 0, 0);
@@ -906,7 +951,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         _spawnRange.max = maxSlot;
         return spawned;
       };
-    }, [_dummy, _tempColor, _spawnRange, acquireSlot]);
+    }, [_dummy, _tempColor, _spawnRange, acquireSlot, writer]);
 
     // ---- Imperative handle -------------------------------------------------
     //
@@ -1504,10 +1549,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         // a default one fades from 1 to 0.
         const fade = fadeScale(b.life, fadeSeconds, fadeCurveFn);
         const s = fade * b.scale;
-        _dummy.position.copy(b.position);
-        _dummy.scale.set(s, s, s);
-        _dummy.updateMatrix();
-        mesh.setMatrixAt(i, _dummy.matrix);
+        writer.write(mesh, i, b.position, b.velocity, s);
         if (maxSlot < 0) {
           minSlot = i;
           maxSlot = i;
@@ -1563,6 +1605,10 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
     // child. JSX always hands this provider a two-element children array, even
     // when `children` is `undefined`, so the fragment fiber always survives —
     // and in the case where it would not, the mesh has no sibling anyway.)
+    //
+    // The same rule is why the optional `outline` mesh is NOT a JSX sibling:
+    // `useBulletRender` adds it imperatively as a three.js child of this mesh,
+    // invisible to React, the reconciler and `scene.children`.
     return (
       <EmitterRegistryContext.Provider value={handle}>
         <>
@@ -1571,7 +1617,13 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
             args={[undefined, undefined, maxBullets]}
             frustumCulled={false}
           >
-            <sphereGeometry args={[bulletRadius, 6, 6]} />
+            {geometry ? (
+              // A consumer geometry is attached, never owned: R3F never
+              // disposes a <primitive>, and `dispose={null}` says so twice.
+              <primitive object={geometry} attach="geometry" dispose={null} />
+            ) : (
+              <sphereGeometry args={[bulletRadius, 6, 6]} />
+            )}
             {material ?? <meshBasicMaterial fog={false} />}
           </instancedMesh>
         </>

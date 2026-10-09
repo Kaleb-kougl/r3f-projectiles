@@ -21,13 +21,13 @@ import type { BulletManagerProps, BulletManagerHandle } from './types';
  * exactly one `<Emitter>` into it — contributing an origin, a pattern, and a
  * cadence. At one emitter the split is invisible from the outside, which is
  * the point: every prop, default, and imperative method behaves exactly as it
- * always has. The wrapper's only real work is splitting the fourteen props
+ * always has. The wrapper's only real work is splitting the seventeen props
  * across the two components and routing `children` to the field's `material`.
  *
  * ## Where the defaults live
  * In `<BulletField>` and `<Emitter>`, not here. This component forwards every
  * prop exactly as it received it — `undefined` included — and `undefined` is
- * precisely what makes a destructuring default apply. So each of the fourteen
+ * precisely what makes a destructuring default apply. So each of the seventeen
  * documented defaults is written down once, in the component that consumes it,
  * and the wrapper cannot drift from the field because it does not restate
  * anything. (Through phase 3 it was the other way round: defaults here,
@@ -99,6 +99,9 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
       fadeCurve,
       children,
       onBulletCount,
+      geometry,
+      orient,
+      outline,
     },
     ref,
   ) {
@@ -161,6 +164,9 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
         reducedMotion={reducedMotion}
         onBulletCount={onBulletCount}
         material={children}
+        geometry={geometry}
+        orient={orient}
+        outline={outline}
       >
         <Emitter
           ref={emitterRef}

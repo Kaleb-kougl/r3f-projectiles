@@ -32,6 +32,9 @@ describe('Public API Barrel File (index.ts)', () => {
       
       // Utilities
       'ProjectileTelemetry',
+
+      // Rendering (0.5.0): ready-made bullet geometries
+      'bulletGeometry',
     ];
 
     const actualExports = Object.keys(PublicAPI);
