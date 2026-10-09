@@ -1,6 +1,8 @@
-import type { Vector3 } from 'three';
+import type { BufferGeometry, Vector3 } from 'three';
 import type { EasingFn, EasingName } from './easing';
 import type { StepMode } from './stepping';
+import type { BulletOrient } from './render/orient';
+import type { BulletOutline } from './render/outline';
 
 export type { EasingFn, EasingName };
 
@@ -173,8 +175,31 @@ export interface BulletManagerProps {
    */
   origin?: { readonly current: Vector3 | null };
 
-  /** Radius of each bullet sphere. @default 0.12 */
+  /**
+   * Radius of each bullet sphere — or, with a custom `geometry`, the scale
+   * applied to that unit-sized geometry. @default 0.12
+   */
   bulletRadius?: number;
+
+  /**
+   * Bullet geometry, replacing the default sphere. Forward is local +X, up is
+   * local +Y, authored at unit size and scaled by `bulletRadius`. **Never
+   * disposed by the manager** — it is yours. See `bulletGeometry` for
+   * ready-made flat shapes.
+   */
+  geometry?: BufferGeometry;
+
+  /**
+   * How each bullet is rotated: `'none'`, `'velocity'` (local +X along the
+   * current velocity) or `'camera'` (billboard). @default 'none'
+   */
+  orient?: BulletOrient;
+
+  /**
+   * A uniform-color rim behind every bullet, drawn by a second instanced mesh
+   * that shares this manager's instance matrices. Omit for none.
+   */
+  outline?: BulletOutline;
 
   /**
    * Seconds of fade-out at the end of a bullet's life. The bullet renders at full

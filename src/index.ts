@@ -55,6 +55,15 @@ export type {
 export type { StepMode } from './stepping';
 export type { EmitterHandle } from './Emitter';
 
+// Rendering: bullet geometry, orientation, outlines (0.5.0)
+export { bulletGeometry } from './render/geometry';
+export type {
+  ArrowGeometryOptions,
+  DiamondGeometryOptions,
+} from './render/geometry';
+export type { BulletOrient } from './render/orient';
+export type { BulletOutline, OutlineMode } from './render/outline';
+
 // Utilities
 export { ProjectileTelemetry } from './ProjectileTelemetry';
 export type { ProjectileTelemetryProps } from './ProjectileTelemetry';

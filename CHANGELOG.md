@@ -8,12 +8,14 @@ were published without tags, so the packaged tarballs are the only record of tho
 
 ## Unreleased (0.5.0)
 
+### Simulation: manual stepping, bounds options, payload helpers
+
 Simulation-side features for fixed-timestep and deterministic games: manual stepping, bounds
 options, and payload bitfields. Additive and backwards compatible — with every new prop at its
 default, the frame loop's observable behaviour is unchanged, and all 203 pre-existing tests pass
 unmodified apart from the two export-surface lists that exist to be updated (below).
 
-### Added
+#### Added
 
 - **`stepMode?: 'auto' | 'manual'`** on `<BulletField>` and `<BulletManager>`, default
   `'auto'` (today's loop). Under `'manual'` the field's `useFrame` advances nothing — cadence
@@ -59,7 +61,7 @@ unmodified apart from the two export-surface lists that exist to be updated (bel
 - **`step(dt)`** on `BulletManagerHandle`, forwarding to the field.
 - **Type** `StepMode`.
 
-### Changed
+#### Changed
 
 - **Documentation only: `boundsLimit` was described as a "distance from origin".** It is, and
   always has been, the half-extent of an axis-aligned **cube** — a bullet is culled when any
@@ -70,7 +72,7 @@ unmodified apart from the two export-surface lists that exist to be updated (bel
   either interface itself (a hand-rolled mock, say) must add them. The type-level test and the
   barrel's exact-export list were updated accordingly.
 
-### Internal
+#### Internal
 
 - The frame loop's body moved, in place, into a `useCallback` step function that both the
   auto frame loop and `step()` call. It folds its dirty slot span into a per-field pending
@@ -79,6 +81,83 @@ unmodified apart from the two export-surface lists that exist to be updated (bel
 - The `paused` frame now also runs the (empty) flush: `syncMeshCount` is idempotent and an
   empty range marks nothing, so nothing observable changes.
 - New internal modules `src/stepping.ts` and `src/dev.ts`, and `src/payload.ts`.
+
+### Rendering: custom geometry, orientation, outlines
+
+Bullets that are shapes rather than spheres: a custom **`geometry`**, an **`orient`** that points
+each bullet along its velocity or at the camera, and an **`outline`** drawn from the field's own
+instance matrices. All three are new props on `<BulletField>` and `<BulletManager>`, all optional,
+and with none of them set the field's output is unchanged — the instance matrix written for a
+visible bullet is bit-for-bit the 0.4.0 one, and a test compares the stored floats to prove it.
+
+#### Added
+
+- **`geometry?: BufferGeometry`** — replaces the default sphere. The convention: forward is local
+  +X, up is local +Y (flat shapes lie in XZ facing +Y), authored at unit size. A custom geometry is
+  scaled by `bulletRadius` and per bullet by `mod.scale` through the instance matrix; the default
+  sphere still bakes `bulletRadius` into its vertices, so its matrices are unchanged.
+
+  **The field never disposes a geometry it did not create** — not on unmount, not when the prop
+  changes. One geometry can be shared by any number of fields, and disposing it is the caller's
+  job. Only the default sphere is the field's to dispose, and it still is.
+- **`bulletGeometry`** — ready-made flat shapes, each call returning a new geometry the caller
+  owns: `quad()` (unit quad with planar UVs, the canvas for a textured sprite), `arrow({
+  headLength?, headWidth?, shaftWidth? })` and `diamond({ width? })`, both pointing along +X.
+  Every helper also carries an `outlineDirection` attribute, a mitred in-plane offset the outline
+  pass uses for an even rim.
+- **`orient?: 'none' | 'velocity' | 'camera'`**, default `'none'`.
+  - `'velocity'` turns local +X onto the bullet's current velocity, every frame — a yaw about
+    world Y, then a pitch, never a roll. In the XZ plane that is a pure rotation about Y, so flat
+    shapes stay face-up; a 3D heading tilts the nose without rolling the shape over. This is
+    deliberately not the shortest-arc rotation, which turns a face-up sprite heading
+    `(−1, 0.01, 0)` upside-down. Zero velocity keeps the last heading, a bullet that never moved
+    stays unrotated, and nothing produces `NaN`. The reduced-motion snapshot aims each frozen
+    bullet along its pattern's velocity.
+  - `'camera'` billboards: every instance takes the camera's world rotation, with local +Y toward
+    the camera. Screen-aligned, read once per frame.
+
+  Allocation-free in both modes, and cheap: over 2,000 moving bullets `'velocity'` measures about
+  1.6–1.7× the `'none'` frame and `'camera'` about 1.1–1.2×, test-renderer overhead included.
+- **`outline?: { color, width, mode? }`** — a uniform-color rim behind every bullet, rendered by a
+  second instanced mesh that shares the bullet mesh's `instanceMatrix` attribute object and reads
+  its live `count`. No per-bullet CPU work and one extra draw call; it moves, rotates, scales and
+  fades with its bullet. `width` is world units at the bullet's base size and scales with the
+  instance. `mode` (`'auto'` by default) picks how the rim is grown: `'alpha'` dilates an
+  alpha-tested sprite's own silhouette, `'extrude'` pushes along `outlineDirection`, `'scale'`
+  scales flat shapes about their origin, `'hull'` is an inverted hull for 3D geometry. The field
+  creates, owns and disposes the outline mesh and its material, and never the shared buffer.
+- **Types**: `BulletOrient`, `BulletOutline`, `OutlineMode`, `ArrowGeometryOptions`,
+  `DiamondGeometryOptions`.
+- **`examples/sprite-bullets`** (`npm run dev:sprites`) — arrows, shards and billboarded orbs from
+  canvas-generated 16×16 textures, tinted per bullet with `mod.color`, outlined, under a 45° / 55°
+  orthographic camera rendering at 480×270.
+
+#### Known limits
+
+Stated in the README under [Outlines](./README.md#outlines) and
+[Orientation](./README.md#orientation), and repeated here so they are not discovered:
+
+- The `'alpha'` outline assumes `bulletGeometry.quad()`'s planar UVs (atlas `offset`/`repeat`
+  honoured) and dilates with 16 texture taps — right for pixel-art widths, gappy for very wide
+  rims across thin features. For a pixel-perfect rim, bake it into the sprite.
+- `'scale'` outlines are exact only for circles; `'hull'` needs smooth normals.
+- The outline material is its own solid `MeshBasicMaterial` and does not inherit the bullet
+  material's fog, clipping planes, blending or opacity.
+- Orientation is written with the matrix, so a `paused` field's billboards keep facing where the
+  camera was when it paused.
+
+#### Internal
+
+- Both "show" write sites — the spawn-time write and the per-frame fade write — now go through one
+  `InstanceWriter` (`src/render/orient.ts`) that composes translation, rotation and base scale.
+  The "hide" writes are untouched. `orient="none"` composes `position × identity × scale`, the same
+  call `Object3D.updateMatrix()` made for the old scratch `_dummy`.
+- The outline mesh is a three.js child of the bullet mesh, added imperatively, so the field still
+  contributes exactly one scene node and `scene.children[0]` is still the bullet mesh.
+- New tests: render integration (geometry ownership, bit-identical default matrices, heading and
+  billboard math at both write sites, outline wiring and disposal), pure unit tests for the
+  helpers, writer, mode resolution and shader patch, a ratio perf test for `orient`, and an
+  allocation test that counts every three.js construction the library's own code makes.
 
 ---
 

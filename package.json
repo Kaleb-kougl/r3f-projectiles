@@ -58,6 +58,7 @@
     "dev": "tsup --watch",
     "dev:stress": "vite examples/stress-test",
     "build:stress": "vite build examples/stress-test --base=/r3f-projectiles/",
+    "dev:sprites": "vite examples/sprite-bullets",
     "test": "vitest run",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint src examples --ext .ts,.tsx",

@@ -337,3 +337,130 @@ describe('BulletField — a burst into a near-full pool is O(burst)', () => {
     expect(tBig).toBeLessThan(tSmall * 10);
   }, 30_000);
 });
+
+// ===========================================================================
+// 3. orient='velocity' and 'camera' cost a bounded multiple of 'none'
+// ===========================================================================
+
+describe('BulletField — orientation stays within a sane per-frame budget', () => {
+  // ---- What is measured ---------------------------------------------------
+  // One whole frame — `advanceFrames(1)` over 2,000 live, moving bullets —
+  // with `orient` the only difference between the two fields. That includes
+  // the test renderer's own per-frame overhead, which is identical on both
+  // sides and so only ever pulls the ratio toward 1: the bound below is a
+  // ceiling on what orientation ADDS, not a microbenchmark of it.
+  //
+  // ---- Statistic and margin -------------------------------------------------
+  // The same discipline as the O(burst) test above, for the same reasons: the
+  // two fields are measured alternately so machine load hits both, and the
+  // FASTEST round per side is compared, because scheduler and GC noise is
+  // additive and one-directional.
+  //
+  // Measured on the current implementation, 2,000 bullets, fastest of 30:
+  //
+  //   unloaded, 8 runs:   none 0.07 – 0.09 ms/frame (renderer overhead
+  //                       included); velocity / none 1.64 – 1.70;
+  //                       camera / none 1.11 – 1.22
+  //   2 CPUs saturated by spinners + 3 concurrent vitest processes, 3 runs:
+  //                       velocity / none 1.56 – 1.68; camera / none 1.20 – 1.22
+  //
+  // So 'velocity' adds roughly 25 ns per bullet — a handful of multiplies,
+  // four square roots on scalars, and a 3-float heading store — and 'camera'
+  // adds almost nothing, because the camera's rotation is read once per frame,
+  // not per bullet. Neither allocates (pinned by
+  // `BulletField.render.alloc.test.tsx`).
+  //
+  // The bound is 2.5×: ~1.5× above the worst observed run. Observed with the
+  // obvious mistake injected — camera mode calling `getWorldQuaternion` per
+  // bullet instead of once per frame — **3.39×**, and the camera assertion
+  // reddens. Per-bullet allocation is not this test's job; the alloc test
+  // counts constructions directly.
+  const N = 2000;
+  const ROUNDS = 30;
+  const WARMUP = 5;
+
+  /** 2,000 slow, immortal bullets fanned around the XZ plane. */
+  const fan: PatternFactory = () => {
+    const out: BulletSpawnData[] = [];
+    for (let k = 0; k < N; k++) {
+      const d = acquire();
+      const a = (k / N) * Math.PI * 2;
+      d.offset.set(0, 0, 0);
+      d.velocity.set(Math.cos(a) * 0.05, (k % 7) * 0.001, Math.sin(a) * 0.05);
+      d.acceleration.set(0, 0, 0);
+      d.delay = 0;
+      d.life = 1e6;
+      d.color = null;
+      d.payload = k;
+      d.scale = 1;
+      out.push(d);
+    }
+    return out;
+  };
+
+  async function mountOriented(
+    orient: NonNullable<BulletFieldProps['orient']>,
+  ): Promise<{ renderer: Renderer; field: () => BulletFieldHandle }> {
+    let ref: React.RefObject<BulletFieldHandle | null> | null = null;
+    const Wrapper = () => {
+      const r = useRef<BulletFieldHandle | null>(null);
+      ref = r;
+      return (
+        <BulletField
+          ref={r}
+          {...FIELD}
+          maxBullets={N}
+          boundsLimit={1000}
+          orient={orient}
+        />
+      );
+    };
+    const renderer = await ReactThreeTestRenderer.create(<Wrapper />);
+    await ReactThreeTestRenderer.act(async () => {
+      ref!.current!.fireAt(ORIGIN, fan, 1);
+    });
+    return { renderer, field: () => ref!.current! };
+  }
+
+  async function fastestFrame(a: Renderer, b: Renderer): Promise<[number, number]> {
+    for (let i = 0; i < WARMUP; i++) {
+      await a.advanceFrames(1, 0.016);
+      await b.advanceFrames(1, 0.016);
+    }
+    let ta = Infinity;
+    let tb = Infinity;
+    for (let i = 0; i < ROUNDS; i++) {
+      let t0 = performance.now();
+      await a.advanceFrames(1, 0.016);
+      const da = performance.now() - t0;
+      t0 = performance.now();
+      await b.advanceFrames(1, 0.016);
+      const db = performance.now() - t0;
+      if (da < ta) ta = da;
+      if (db < tb) tb = db;
+    }
+    return [ta, tb];
+  }
+
+  it("orient='velocity' over 2,000 bullets costs under 2.5× orient='none'", async () => {
+    const none = await mountOriented('none');
+    const vel = await mountOriented('velocity');
+    expect(none.field().activeCount).toBe(N);
+    expect(vel.field().activeCount).toBe(N);
+
+    const [tNone, tVel] = await fastestFrame(none.renderer, vel.renderer);
+    expect(tNone).toBeGreaterThan(0);
+    expect(tVel).toBeLessThan(tNone * 2.5);
+    // Every bullet was still drawn and still alive: the comparison is like
+    // for like, not a field that quietly culled its work.
+    expect(vel.field().activeCount).toBe(N);
+  }, 30_000);
+
+  it("orient='camera' over 2,000 bullets costs under 2.5× orient='none'", async () => {
+    const none = await mountOriented('none');
+    const cam = await mountOriented('camera');
+    const [tNone, tCam] = await fastestFrame(none.renderer, cam.renderer);
+    expect(tNone).toBeGreaterThan(0);
+    expect(tCam).toBeLessThan(tNone * 2.5);
+  }, 30_000);
+});
