@@ -33,6 +33,7 @@ export default function App() {
 - **Near-Zero Allocation**: I create scratch `Object3D`, `Vector3`, and `Color` objects once and reuse them every frame, so nothing is allocated per bullet. Three per-burst/per-flush exceptions are named under [Near-Zero-Allocation Render Loop](#near-zero-allocation-render-loop). No garbage collection spikes.
 - **Object Pooling**: `acquire()` and `releaseSpawnData()` recycle object state to eliminate allocation pressure.
 - **Shaped, Aimed, Outlined**: Swap the sphere for any geometry (`bulletGeometry.arrow()`, a textured sprite quad, your own mesh), point each bullet along its velocity or at the camera with `orient`, and draw a readable dark rim with `outline` — one extra draw call, no extra per-bullet work.
+- **Many Looks, One Draw**: `frames` gives every bullet its own cell of a sprite atlas, picked from its payload, and `orient="camera-velocity"` turns screen-aligned pixel sprites toward where they fly — a whole bullet hell's worth of arrows, orbs and shards in one mesh.
 - **Accessibility Built-In**: Use `reducedMotion` to render a static, zero-velocity snapshot for motion-sensitive users.
 - **Tree-Shakeable**: Import raw pattern math from `@k9kbdev/r3f-projectiles/patterns` and the headless simulation from `@k9kbdev/r3f-projectiles/core`. Leave React behind if you don't need it.
 - **TypeScript Native**: Shipped with complete type definitions.
@@ -221,8 +222,9 @@ Two emitters, one `<instancedMesh>`, one pool, one `useFrame`. The material is a
 | `onPoolExhausted` | `(emitterId, requested, spawned, reason) => void` | — | Called once per burst that could not be filled, with `reason` naming which constraint bound. See [One pool, first-come, first-served](#one-pool-first-come-first-served). |
 | `material` | `ReactNode` | `<meshBasicMaterial fog={false} />` | The shared mesh's material. One field, one material. |
 | `geometry` | `BufferGeometry` | sphere | Bullet shape, unit-sized, forward +X, up +Y. **Never disposed by the field.** See [Bullet geometry](#bullet-geometry). |
-| `orient` | `'none' \| 'velocity' \| 'camera'` | `'none'` | Rotate each bullet along its velocity, or billboard it to the camera. See [Orientation](#orientation). |
+| `orient` | `'none' \| 'velocity' \| 'camera' \| 'camera-velocity'` | `'none'` | Rotate each bullet along its velocity, billboard it to the camera, or both (0.7.0: a billboard turned toward the on-screen heading). See [Orientation](#orientation). |
 | `outline` | `{ color, width, mode? }` | — | A uniform-color rim behind every bullet, from a second mesh sharing this field's instance matrices. See [Outlines](#outlines). |
+| `frames` | `{ columns, rows, frame, upright? }` | — | 0.7.0: per-bullet **sprite frames** from one atlas — `frame(index, payload)` picks each bullet's cell. Needs a `geometry` with quad UVs. See [Sprite atlases: per-bullet frames](#sprite-atlases-per-bullet-frames). |
 | `simulation` | `BulletSimulation` | — | Render a simulation **you own** (from `createBulletSimulation`) instead of running one. The field then never steps, spawns or culls; it syncs matrices once per frame. Simulation props (`maxBullets`, `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `paused`, `reducedMotion`, `stepMode`, `onPoolExhausted`) are ignored and `<Emitter>` children throw. See [Rendering a simulation you own](#rendering-a-simulation-you-own-bulletfield-simulation). |
 | `interpolate` | `() => number` | — | With `simulation` (created with `interpolation: true`): the fraction of a step to draw between the last two steps, read once per frame. |
 | `children` | `ReactNode` | — | The field's `<Emitter>` elements. Not allowed with `simulation`. |
@@ -371,7 +373,7 @@ Read nothing else into service order. It is specified so that exhaustion is dete
 
 A field renders one `<instancedMesh>`, so it has exactly one material. The `material` prop says that in the type signature rather than in a paragraph you have to find. Per-bullet **color** still varies freely via `mod.color`, so mixed-hue emitters share a field for free; what cannot vary is the material itself.
 
-A second material therefore means a second `<BulletField>` — which means a second pool, which is the exact cost the split exists to remove. So **partition emitters by material, not by faction or entity type.** A shader change earns a new field; a faction does not. Every emitter that draws with the same emissive material belongs in one field whether it belongs to the player or the boss.
+A second material therefore means a second `<BulletField>` — which means a second pool, which is the exact cost the split exists to remove. (Different *looks* do not need different materials: since 0.7.0 one textured material can show a different atlas cell per bullet — see [Sprite atlases](#sprite-atlases-per-bullet-frames).) So **partition emitters by material, not by faction or entity type.** A shader change earns a new field; a faction does not. Every emitter that draws with the same emissive material belongs in one field whether it belongs to the player or the boss.
 
 ```tsx
 <>
@@ -917,7 +919,7 @@ function Arrows() {
 
 #### `bulletGeometry`
 
-Ready-made flat shapes, all unit-sized, +X forward, facing +Y, with UVs and an `outlineDirection` attribute for [outlines](#outlines). **Each call returns a new geometry** — build it once with `useMemo`.
+Ready-made flat shapes, all unit-sized, +X forward, facing +Y, with UVs and an `outlineDirection` attribute for [outlines](#outlines) (its name is exported as `OUTLINE_DIRECTION_ATTRIBUTE` since 0.7.0, for your own shapes). **Each call returns a new geometry** — build it once with `useMemo`.
 
 | Helper | Shape |
 |---|---|
@@ -936,10 +938,13 @@ UVs are planar: `u = 0.5 + x/2`, `v = 0.5 − z/2`. In texture terms, **the righ
 | `'none'` (default) | No rotation — translation × uniform scale, byte-for-byte the 0.4.0 matrix. | Spheres, round sprites under a fixed top-down camera. |
 | `'velocity'` | Local +X turned onto the bullet's **current** velocity, every frame. | Arrows, shards, anything with a nose. Follows curved paths from `mod.accelerate`. |
 | `'camera'` | Billboard: every instance takes the camera's world rotation, local +Y toward the camera, +X to screen right, −Z to screen up. | Round or symmetric sprites that should always face the viewer. |
+| `'camera-velocity'` (0.7.0) | The `'camera'` billboard, then rolled in the screen plane so local +X points along the bullet's velocity **as seen on screen** (projected onto the camera's right / up axes). | Sprites with a nose under an angled camera: they stay flat to the screen at exact pixel size, where `'velocity'` would lay them on the ground, foreshortened. |
 
 `'velocity'`, precisely: a yaw about world Y to the heading's horizontal direction, then a pitch up or down to it. So a velocity in the XZ plane — every bullet in a top-down game — is a pure rotation about Y and a flat shape stays face-up, and a 3D heading tilts the nose without ever rolling the shape over. (That is deliberately *not* the shortest-arc rotation from +X, which rolls a face-up sprite heading `(−1, 0.01, 0)` upside-down, where a front-side material culls it.) A bullet whose velocity is zero keeps its last heading; one that has never moved stays unrotated; neither ever produces `NaN`. In the `reducedMotion` snapshot, where velocity is forced to zero, each bullet is aimed along the velocity its pattern gave it.
 
 Cost, measured in the perf suite over 2,000 moving bullets (fastest of 30 frames, test-renderer overhead included): `'none'` ≈ 0.07–0.09 ms per frame, `'velocity'` ≈ 1.6–1.7× that (about 25 ns per bullet — a few multiplies and square roots on scalars), `'camera'` ≈ 1.1–1.2×, because the camera's rotation is read once per frame rather than per bullet.
+
+`'camera-velocity'`, precisely: the billboard rotation, then a roll about the billboard's local +Y (the axis toward the camera) by the heading's on-screen angle, computed with square roots like `'velocity'` — no trig, no allocation. A velocity with no on-screen extent (straight at the camera) draws unrolled; zero velocity keeps the last heading. With [`frames`](#sprite-atlases-per-bullet-frames), an `upright(frame)` callback exempts round cells from the roll (and from `'velocity'`'s rotation).
 
 Two things to know:
 
@@ -972,6 +977,40 @@ const tex = useMemo(() => {
 **Per-bullet `mod.color` tints the texture.** The instance color multiplies the map (and the material's own `color`), so draw the sprite in white and light greys and let `mod.color` supply the hue: one texture, one field, a magenta volley and an orange one. Shaded greys in the art become shaded tints.
 
 [`examples/sprite-bullets`](./examples/sprite-bullets/App.tsx) builds arrows, shards and billboarded orbs from 16×16 textures drawn into a canvas at startup — no binary assets — under the angled orthographic camera a top-down pixel-art game uses. Run it with `npm run dev:sprites`.
+
+### Sprite atlases: per-bullet frames
+
+*0.7.0.* One field is one mesh and one material — but not one *look*. Give the material's `map` an atlas of equal cells and pass `frames`, and every bullet shows the cell `frame(index, payload)` picks for it, so arrows, orbs and shards share one pool and one draw call:
+
+```tsx
+const quad = useMemo(() => bulletGeometry.quad(), []);
+const atlas = useMemo(() => makeAtlasTexture(), []);   // 4 x 2 cells, nearest filtered
+
+const frames = useMemo<BulletFrames>(() => ({
+  columns: 4,
+  rows: 2,
+  // Called whenever a bullet's matrix is written; the payload says what it is.
+  frame: (index, payload) => LOOK.get(payload & 0xf) ?? 0,
+  // Round cells skip orient's velocity rotation.
+  upright: (cell) => cell >= 4,
+}), []);
+
+<BulletField
+  simulation={sim}
+  geometry={quad}
+  bulletRadius={0.4}
+  orient="camera-velocity"
+  frames={frames}
+  material={<meshBasicMaterial map={atlas} alphaTest={0.5} />}
+  outline={{ color: '#1a0612', width: 0.06 }}
+/>
+```
+
+- **Cells** are numbered left to right, top to bottom; cell `0` is the top-left of the image as three samples it (`v = 1` is the top, so a `CanvasTexture` or image texture reads the way it looks). An index outside the grid wraps; non-integers round. The map's own `offset` / `repeat` apply after the cell is picked, so the grid can be a region of a larger texture.
+- **When `frame` runs**: wherever the bullet's matrix is written — at spawn, on every step it moves, and every frame while an external simulation is [interpolated](#rendering-a-simulation-you-own-bulletfield-simulation). It gets the slot index and the payload; with an external simulation, read anything else you need (`velocityAt(i)`, `scaleAt(i)`, `emitterIdAt(i)`) from the simulation. Keep it allocation-free: it runs once per drawn bullet. To animate (a 2-frame flicker), fold a clock into the cell; to pre-rotate pixel art, fold the on-screen heading in and draw with `orient="camera"`.
+- **How**: the field draws a *view* of your geometry that shares its index and attribute objects (so three uploads them once, for every field) plus a per-instance `bulletFrame` attribute (exported as `FRAME_ATTRIBUTE`), uploaded over the same slot range as the matrices. Your geometry itself is never modified or disposed; the view's own buffer is released on unmount without touching the shared ones. Your material is patched (`onBeforeCompile`, chained after any you set; its program cache key extended) so its `map` UV picks the cell, and the patch is undone when `frames` goes away.
+- **Outlines follow the cell**: the `'alpha'` rim dilates the bullet's own cell and treats everything past its edge as empty — a neighbouring cell never bleeds in. For a pixel-perfect rim at every rotation, bake it into the atlas instead (Kaleb-Vale does: its atlas is rebuilt when the palette changes anyway).
+- **Needs** a `geometry` with `bulletGeometry.quad()`'s planar UVs, a material with a `map`, and three r151+ (`vMapUv`). On the default sphere `frames` is ignored with a development warning.
 
 ### Outlines
 

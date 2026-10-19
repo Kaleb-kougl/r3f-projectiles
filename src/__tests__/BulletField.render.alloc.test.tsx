@@ -139,6 +139,18 @@ const CASES: Array<[string, Omit<BulletFieldProps, 'children'>]> = [
       outline: { color: 'black', width: 0.05 },
     },
   ],
+  [
+    "0.7.0 frames atlas + 'alpha' outline + orient='camera-velocity'",
+    {
+      orient: 'camera-velocity',
+      geometry: bulletGeometry.quad(),
+      material: (
+        <meshBasicMaterial map={new DataTexture(new Uint8Array(64), 4, 4)} alphaTest={0.5} />
+      ),
+      outline: { color: 'black', width: 0.05 },
+      frames: { columns: 2, rows: 2, frame: (i: number) => i & 3, upright: (f: number) => f === 3 },
+    },
+  ],
 ];
 
 describe('render paths construct nothing per frame', () => {

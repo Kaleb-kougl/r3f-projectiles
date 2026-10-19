@@ -3,8 +3,10 @@ import {
   Quaternion,
   Vector3,
   type Camera,
+  type InstancedBufferAttribute,
   type InstancedMesh,
 } from 'three';
+import type { BulletFrames } from './frames';
 
 /**
  * How each bullet instance is rotated.
@@ -25,8 +27,27 @@ import {
  *   `lookAt`: under a perspective camera, sprites near the frustum edge are
  *   parallel to the screen rather than turned toward the eye, which is the
  *   usual billboard trade and invisible at bullet sizes.
+ * - `'camera-velocity'` (0.7.0) — the `'camera'` billboard, then rolled in
+ *   the screen plane so local **+X** points along the bullet's velocity **as
+ *   seen on screen** (projected onto the camera's right / up axes). A sprite
+ *   drawn pointing right stays a flat, screen-aligned sprite — exact pixel
+ *   size under an orthographic camera — and still turns to face where it is
+ *   going. The pixel-art choice for arrows and shards under an angled camera,
+ *   where `'velocity'` would lay them on the ground, foreshortened. A velocity
+ *   with no on-screen extent (straight at the camera) draws unrolled; zero
+ *   velocity keeps the last heading, like `'velocity'`.
  */
-export type BulletOrient = 'none' | 'velocity' | 'camera';
+export type BulletOrient = 'none' | 'velocity' | 'camera' | 'camera-velocity';
+
+/** Modes that read the camera's rotation once per frame. */
+export function orientUsesCamera(orient: BulletOrient): boolean {
+  return orient === 'camera' || orient === 'camera-velocity';
+}
+
+/** Modes that keep a last heading per slot. */
+function orientUsesHeading(orient: BulletOrient): boolean {
+  return orient === 'velocity' || orient === 'camera-velocity';
+}
 
 /** Below this squared speed a velocity is "zero" and carries no heading. */
 const STILL_SQ = 1e-12;
@@ -41,6 +62,9 @@ const FACE_CAMERA = /* @__PURE__ */ new Quaternion().setFromAxisAngle(
 );
 
 const EMPTY_DIRS = new Float32Array(0);
+
+/** Below this squared on-screen speed a heading has no screen direction. */
+const SCREEN_STILL_SQ = 1e-18;
 
 /**
  * The one place a **visible** bullet's instance matrix is composed.
@@ -81,12 +105,26 @@ export class InstanceWriter {
    * first frame has synced one (e.g. `fireAt` on a paused field at mount).
    */
   cameraSource: (() => Camera | null | undefined) | null = null;
+  /**
+   * Per-bullet sprite frames (0.7.0), and the per-instance attribute they are
+   * written to. Both `null` unless the field has `frames` and a geometry.
+   */
+  frames: BulletFrames | null = null;
+  frameAttribute: InstancedBufferAttribute | null = null;
 
   private readonly _m = new Matrix4();
   private readonly _q = new Quaternion();
   private readonly _s = new Vector3();
   private readonly _identity = new Quaternion();
   private readonly _cam = new Quaternion();
+  private readonly _roll = new Quaternion();
+  /** Camera right / up in world space, for `'camera-velocity'`. */
+  private _rx = 1;
+  private _ry = 0;
+  private _rz = 0;
+  private _ux = 0;
+  private _uy = 1;
+  private _uz = 0;
   private _camSynced = false;
   private _dirs: Float32Array = EMPTY_DIRS;
 
@@ -97,7 +135,7 @@ export class InstanceWriter {
     capacity: number,
     cameraSource: (() => Camera | null | undefined) | null,
   ): void {
-    if (orient !== 'camera') this._camSynced = false;
+    if (!orientUsesCamera(orient)) this._camSynced = false;
     this.orient = orient;
     this.baseScale = baseScale;
     this.capacity = capacity;
@@ -111,8 +149,27 @@ export class InstanceWriter {
    * nothing either.
    */
   syncCamera(camera: Camera): void {
-    camera.getWorldQuaternion(this._cam).multiply(FACE_CAMERA);
+    const q = camera.getWorldQuaternion(this._cam);
+    // Camera right (+X) and up (+Y) in world space, from the raw rotation,
+    // before the billboard's face-the-camera turn is folded in.
+    const x = q.x;
+    const y = q.y;
+    const z = q.z;
+    const w = q.w;
+    this._rx = 1 - 2 * (y * y + z * z);
+    this._ry = 2 * (x * y + w * z);
+    this._rz = 2 * (x * z - w * y);
+    this._ux = 2 * (x * y - w * z);
+    this._uy = 1 - 2 * (x * x + z * z);
+    this._uz = 2 * (y * z + w * x);
+    q.multiply(FACE_CAMERA);
     this._camSynced = true;
+  }
+
+  /** Point the writer at a frames config and its attribute (or neither). */
+  configureFrames(frames: BulletFrames | null, attribute: InstancedBufferAttribute | null): void {
+    this.frames = frames && attribute ? frames : null;
+    this.frameAttribute = frames && attribute ? attribute : null;
   }
 
   /**
@@ -124,10 +181,10 @@ export class InstanceWriter {
    * The field passes the **spawn data's** velocity, not the bullet's: in the
    * reduced-motion snapshot the bullet's velocity is forced to zero, and this is
    * what keeps those frozen arrows pointing the way the pattern aimed them.
-   * A no-op unless `orient` is `'velocity'`.
+   * A no-op unless `orient` is `'velocity'` or `'camera-velocity'`.
    */
   prime(slot: number, velocity: Vector3): void {
-    if (this.orient !== 'velocity') return;
+    if (!orientUsesHeading(this.orient)) return;
     const dirs = this.dirsFor(slot);
     const o = slot * 3;
     const vx = velocity.x;
@@ -152,6 +209,10 @@ export class InstanceWriter {
    * `position`, rotation per {@link orient}, uniform scale
    * `baseScale × scale`.
    *
+   * With {@link frames} set, also picks the bullet's sprite cell from its
+   * `payload` and stores it in the frame attribute; a cell that is `upright`
+   * skips the velocity rotation.
+   *
    * Goes through `mesh.setMatrixAt`, never a direct buffer write, so the
    * perf suite's slot counter keeps seeing every write.
    */
@@ -161,23 +222,99 @@ export class InstanceWriter {
     position: Vector3,
     velocity: Vector3,
     scale: number,
+    payload = 0,
   ): void {
     const k = scale * this.baseScale;
     this._s.set(k, k, k);
 
+    let turn = true;
+    const frames = this.frames;
+    if (frames !== null) {
+      const f = frames.frame(slot, payload);
+      const attr = this.frameAttribute!;
+      if (slot < attr.count) (attr.array as Float32Array)[slot] = f;
+      if (frames.upright !== undefined && frames.upright(f)) turn = false;
+    }
+
     let q = this._identity;
-    if (this.orient === 'velocity') {
-      q = this.headingQuaternion(slot, velocity);
-    } else if (this.orient === 'camera') {
+    const orient = this.orient;
+    if (orient === 'velocity') {
+      if (turn) q = this.headingQuaternion(slot, velocity);
+      else this.recordHeading(slot, velocity);
+    } else if (orient === 'camera' || orient === 'camera-velocity') {
       if (!this._camSynced) {
         const cam = this.cameraSource?.();
         if (cam) this.syncCamera(cam);
       }
-      q = this._cam;
+      q = orient === 'camera-velocity' && turn ? this.screenHeadingQuaternion(slot, velocity) : this._cam;
     }
 
     this._m.compose(position, q, this._s);
     mesh.setMatrixAt(slot, this._m);
+  }
+
+  /**
+   * Store a moving bullet's heading without rotating it (an `upright` cell),
+   * so a later turning cell — or a stop — still knows where it was going.
+   */
+  private recordHeading(slot: number, velocity: Vector3): void {
+    const vx = velocity.x;
+    const vy = velocity.y;
+    const vz = velocity.z;
+    const sq = vx * vx + vy * vy + vz * vz;
+    if (sq <= STILL_SQ) return;
+    const dirs = this.dirsFor(slot);
+    const o = slot * 3;
+    const inv = 1 / Math.sqrt(sq);
+    dirs[o] = vx * inv;
+    dirs[o + 1] = vy * inv;
+    dirs[o + 2] = vz * inv;
+  }
+
+  /**
+   * `'camera-velocity'`: the billboard rotation, then a roll about the
+   * billboard's local +Y (the axis toward the camera) by the heading's angle
+   * on screen, `φ`, with `cos φ = s·right / |s|` and `sin φ = s·up / |s|` for
+   * the heading `s` projected onto the camera's right / up axes.
+   *
+   * A rotation by `φ` about +Y maps local +X to `(cos φ, 0, −sin φ)`, which the
+   * billboard sends to `cos φ · right + sin φ · up` — the screen heading. Its
+   * quaternion is `(0, sin φ/2, 0, cos φ/2)`; the half angles come from square
+   * roots as in {@link headingQuaternion}, so no trig call is made.
+   */
+  private screenHeadingQuaternion(slot: number, velocity: Vector3): Quaternion {
+    const dirs = this.dirsFor(slot);
+    const o = slot * 3;
+    let dx: number;
+    let dy: number;
+    let dz: number;
+    const vx = velocity.x;
+    const vy = velocity.y;
+    const vz = velocity.z;
+    const sq = vx * vx + vy * vy + vz * vz;
+    if (sq > STILL_SQ) {
+      const inv = 1 / Math.sqrt(sq);
+      dx = vx * inv;
+      dy = vy * inv;
+      dz = vz * inv;
+      dirs[o] = dx;
+      dirs[o + 1] = dy;
+      dirs[o + 2] = dz;
+    } else {
+      dx = dirs[o];
+      dy = dirs[o + 1];
+      dz = dirs[o + 2];
+    }
+    const sx = dx * this._rx + dy * this._ry + dz * this._rz;
+    const sy = dx * this._ux + dy * this._uy + dz * this._uz;
+    const len2 = sx * sx + sy * sy;
+    if (!(len2 > SCREEN_STILL_SQ)) return this._cam;
+    const cosPhi = sx / Math.sqrt(len2);
+    const c = Math.sqrt(Math.max(0, (1 + cosPhi) * 0.5));
+    let s = Math.sqrt(Math.max(0, (1 - cosPhi) * 0.5));
+    if (sy < 0) s = -s;
+    this._roll.set(0, s, 0, c);
+    return this._q.multiplyQuaternions(this._cam, this._roll);
   }
 
   /**

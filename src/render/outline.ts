@@ -11,8 +11,10 @@ import {
   type Material,
   type Texture,
   type WebGLProgramParametersWithUniforms,
+  Vector2,
 } from 'three';
 import { OUTLINE_DIRECTION_ATTRIBUTE } from './geometry';
+import { FRAME_ATTRIBUTE, FRAME_UV_GLSL, frameAttributeOf } from './frames';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -150,6 +152,10 @@ uniform float outlineScale;
 #endif
 #ifdef OUTLINE_ALPHA
   varying vec2 vOutlineUv;
+#endif
+#ifdef OUTLINE_FRAMES
+  attribute float ${FRAME_ATTRIBUTE};
+  varying float vOutlineFrame;
 #endif`,
     )
     .replace(
@@ -164,6 +170,9 @@ uniform float outlineScale;
 #endif
 #ifdef OUTLINE_ALPHA
   vOutlineUv = vec2( 0.5 + transformed.x * 0.5, 0.5 - transformed.z * 0.5 );
+#endif
+#ifdef OUTLINE_FRAMES
+  vOutlineFrame = ${FRAME_ATTRIBUTE};
 #endif`,
     );
 
@@ -177,9 +186,18 @@ uniform float outlineScale;
   uniform float outlineAlphaTest;
   uniform float outlineUvRadius;
   varying vec2 vOutlineUv;
+#ifdef OUTLINE_FRAMES
+  uniform vec2 outlineFrameGrid;
+  varying float vOutlineFrame;
+  ${FRAME_UV_GLSL}
+#endif
   float outlineTap( vec2 uv ) {
     // Outside the sprite's own [0, 1] square is empty, not a clamped edge.
+    // With frames, that square is the bullet's own cell: never a neighbour's.
     if ( uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 ) return 0.0;
+#ifdef OUTLINE_FRAMES
+    uv = r3fpFrameUv( uv, vOutlineFrame, outlineFrameGrid );
+#endif
     return texture2D( outlineMap, ( outlineUvTransform * vec3( uv, 1.0 ) ).xy ).a;
   }
   float outlineDilatedAlpha( vec2 uv ) {
@@ -229,6 +247,7 @@ interface OutlineUniforms {
   outlineUvTransform: { value: Matrix3 };
   outlineAlphaTest: { value: number };
   outlineUvRadius: { value: number };
+  outlineFrameGrid: { value: Vector2 };
 }
 
 /** Per-outline bookkeeping that is not on the three objects themselves. */
@@ -238,6 +257,8 @@ interface OutlineState {
   mode: ResolvedOutlineMode | null;
   /** Whether `'alpha'` is pushing along `outlineDirection` (vs. scaling). */
   alphaExtrudes: boolean;
+  /** Whether the program samples per-instance frame cells (0.7.0). */
+  frames: boolean;
   /** Geometry the cached radius belongs to. */
   radiusOf: BufferGeometry | null;
   radius: number;
@@ -291,6 +312,7 @@ export function createOutlineMesh(): OutlineMesh {
     outlineUvTransform: { value: new Matrix3() },
     outlineAlphaTest: { value: 0.5 },
     outlineUvRadius: { value: 0 },
+    outlineFrameGrid: { value: new Vector2(1, 1) },
   };
 
   const material = new MeshBasicMaterial({ fog: false });
@@ -312,6 +334,7 @@ export function createOutlineMesh(): OutlineMesh {
     uniforms,
     mode: null,
     alphaExtrudes: false,
+    frames: false,
     radiusOf: null,
     radius: 1,
     color: material.color,
@@ -380,11 +403,14 @@ export function configureOutline(
  * sphere, `bulletRadius` for a consumer geometry). The outline is grown in the
  * geometry's own space, before the instance matrix, so a world-unit width is
  * divided by it here.
+ * @param frameGrid - With per-bullet frames (0.7.0), the atlas grid, so an
+ * `'alpha'` rim dilates each bullet's own cell. `null` otherwise.
  */
 export function syncOutline(
   outline: OutlineMesh,
   mesh: InstancedMesh | null,
   baseScale: number,
+  frameGrid: readonly [number, number] | null = null,
 ): void {
   if (!mesh) return;
   if (outline.parent !== mesh) mesh.add(outline);
@@ -399,11 +425,16 @@ export function syncOutline(
   const mode = resolveOutlineMode(s.requested, geometry, mesh.material);
   const alphaExtrudes =
     mode === 'alpha' && !!geometry.getAttribute(OUTLINE_DIRECTION_ATTRIBUTE);
-  if (mode !== s.mode || alphaExtrudes !== s.alphaExtrudes) {
+  // Frames matter only to the alpha rim, and only when the geometry carries
+  // the per-instance cell (the field's frames view does).
+  const frames = mode === 'alpha' && frameGrid !== null && frameAttributeOf(geometry) !== null;
+  if (mode !== s.mode || alphaExtrudes !== s.alphaExtrudes || frames !== s.frames) {
     s.mode = mode;
     s.alphaExtrudes = alphaExtrudes;
-    applyMode(material, mode, alphaExtrudes);
+    s.frames = frames;
+    applyMode(material, mode, alphaExtrudes, frames);
   }
+  if (frames) s.uniforms.outlineFrameGrid.value.set(frameGrid![0], frameGrid![1]);
 
   if (s.radiusOf !== geometry) {
     s.radiusOf = geometry;
@@ -436,12 +467,14 @@ function applyMode(
   material: MeshBasicMaterial,
   mode: ResolvedOutlineMode,
   alphaExtrudes: boolean,
+  frames: boolean,
 ): void {
   const defines: Record<string, string> = {};
   if (mode === 'hull') defines.OUTLINE_HULL = '';
   else if (mode === 'extrude' || alphaExtrudes) defines.OUTLINE_EXTRUDE = '';
   else defines.OUTLINE_SCALE = '';
   if (mode === 'alpha') defines.OUTLINE_ALPHA = '';
+  if (frames) defines.OUTLINE_FRAMES = '';
   material.defines = defines;
 
   if (mode === 'hull') {

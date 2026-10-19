@@ -15,9 +15,11 @@ import {
   Vector3,
   DynamicDrawUsage,
   type BufferGeometry,
+  type InstancedBufferAttribute,
   type InstancedMesh as InstancedMeshType,
 } from 'three';
 import { useBulletRender } from './render/useBulletRender';
+import { FRAME_ATTRIBUTE, type BulletFrames } from './render/frames';
 import type { BulletOrient, InstanceWriter } from './render/orient';
 import type { BulletOutline } from './render/outline';
 import { resolveEasing } from './easing';
@@ -87,6 +89,15 @@ function markMatrixDirty(
     );
   }
   attr.needsUpdate = true;
+  // 0.7.0 frames: the per-instance cell is written beside every matrix, so it
+  // uploads over the same slots.
+  const frame = mesh.geometry.attributes[FRAME_ATTRIBUTE] as InstancedBufferAttribute | undefined;
+  if (frame !== undefined) {
+    if (typeof frame.addUpdateRange === 'function') {
+      frame.addUpdateRange(minSlot, maxSlot - minSlot + 1);
+    }
+    frame.needsUpdate = true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +645,16 @@ export interface BulletFieldProps {
    */
   outline?: BulletOutline;
   /**
+   * Per-bullet **sprite frames** from one texture atlas (0.7.0): the
+   * material's `map` is read as a `columns × rows` grid and `frame(index,
+   * payload)` picks each bullet's cell whenever its matrix is written — so one
+   * field draws arrows, orbs and shards together, chosen from the payload. An
+   * `upright(frame)` callback marks cells that `orient`'s velocity rotation
+   * skips. Needs a `geometry` with quad UVs (`bulletGeometry.quad()`); the
+   * `'alpha'` outline follows each bullet's cell. See {@link BulletFrames}.
+   */
+  frames?: BulletFrames;
+  /**
    * Render a simulation **you own** instead of running one.
    *
    * Pass a {@link BulletSimulation} from `createBulletSimulation()` — the
@@ -891,7 +912,7 @@ function syncExternal(
     const position = interpolating
       ? sim.previousPositionAt(i, scratch).lerp(sim.positionAt(i), alpha)
       : sim.positionAt(i);
-    writer.write(mesh, i, position, sim.velocityAt(i), sim.fadeAt(i) * sim.scaleAt(i));
+    writer.write(mesh, i, position, sim.velocityAt(i), sim.fadeAt(i) * sim.scaleAt(i), sim.payloadAt(i));
   }
 
   mesh.count = hw;
@@ -924,6 +945,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
       geometry,
       orient = 'none',
       outline,
+      frames,
       simulation,
       interpolate,
       children,
@@ -1029,12 +1051,13 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
     // ---- Render options (geometry / orient / outline) ----------------------
     // Composes every matrix that SHOWS a bullet, and owns the camera sync and
     // the outline mesh. Stable for the field's life.
-    const writer = useBulletRender(meshRef, {
+    const { writer, geometry: drawGeometry } = useBulletRender(meshRef, {
       maxBullets: capacity,
       bulletRadius,
       geometry,
       orient,
       outline,
+      frames,
     });
 
     // ---- The field's own simulation ----------------------------------------
@@ -1061,7 +1084,7 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
         },
         show(slot, position, velocity, scale) {
           const mesh = meshRef.current;
-          if (mesh) writer.write(mesh, slot, position, velocity, scale);
+          if (mesh) writer.write(mesh, slot, position, velocity, scale, c.payloadAt(slot));
         },
         hide(slot) {
           const mesh = meshRef.current;
@@ -1698,10 +1721,12 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
             args={[undefined, undefined, capacity]}
             frustumCulled={false}
           >
-            {geometry ? (
+            {drawGeometry ? (
               // A consumer geometry is attached, never owned: R3F never
               // disposes a <primitive>, and `dispose={null}` says so twice.
-              <primitive object={geometry} attach="geometry" dispose={null} />
+              // With `frames` it is the field's view of that geometry, which
+              // `useBulletRender` disposes (without the shared buffers).
+              <primitive object={drawGeometry} attach="geometry" dispose={null} />
             ) : (
               <sphereGeometry args={[bulletRadius, 6, 6]} />
             )}

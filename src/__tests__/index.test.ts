@@ -42,6 +42,11 @@ describe('Public API Barrel File (index.ts)', () => {
       // Headless simulation (0.6.0), also on the React-free `/core` entry
       'createBulletSimulation',
       'createSeededRandom',
+
+      // Rendering (0.7.0): per-bullet sprite frames; the outline attribute
+      // name custom flat geometries need for an even 'extrude' rim
+      'FRAME_ATTRIBUTE',
+      'OUTLINE_DIRECTION_ATTRIBUTE',
     ];
 
     const actualExports = Object.keys(PublicAPI);

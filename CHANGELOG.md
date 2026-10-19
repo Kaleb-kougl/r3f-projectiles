@@ -6,7 +6,61 @@ were published without tags, so the packaged tarballs are the only record of tho
 
 ---
 
-## Unreleased (0.6.0)
+## Unreleased (0.7.0)
+
+### Sprite atlases: per-bullet frames; screen-facing velocity billboards
+
+For pixel-art games that draw every bullet as a sprite: many looks in one field, chosen per bullet from its payload,
+and sprites that face where they fly without leaving the screen plane. Additive and backwards compatible — all 385
+pre-existing tests pass unmodified apart from the barrel's exact-export list (below); with `frames` unset and no new
+`orient` value, every matrix and buffer write is the 0.6.0 one.
+
+#### Added
+
+- **`frames?: BulletFrames`** on `<BulletField>` and `<BulletManager>` — `{ columns, rows, frame(index, payload),
+  upright?(frame) }`. The material's `map` is read as a `columns × rows` atlas (cell 0 top-left, `v = 1` at the top)
+  and `frame` picks each bullet's cell whenever its matrix is written: at spawn, on every step it moves, and every
+  frame while an external simulation is interpolated. One field, one material, one draw call — any number of looks.
+  - The field draws a **view** of the consumer geometry that shares its index and attribute objects by reference
+    plus a per-instance `bulletFrame` attribute, uploaded with `addUpdateRange` over the same slots as
+    `instanceMatrix`. The consumer geometry is never modified or disposed; the view's dispose releases only its own
+    buffer (the shared ones are hidden from three's dispose path for that synchronous event, then restored).
+  - The consumer **material is patched** (`onBeforeCompile`, chained after the material's own; program cache key =
+    the original's + a suffix, so patched and unpatched materials never share a program; a define) so `vMapUv` picks
+    the cell. Unpatched when `frames` is removed or the material changes. Needs three r151+ (`vMapUv` / `MAP_UV`);
+    the patch's anchors are tested against the installed three's `ShaderLib`.
+  - The **`'alpha'` outline follows the cell**: it dilates the bullet's own cell and treats every tap past the cell's
+    edge as empty, so a neighbouring cell never bleeds into a rim.
+  - `upright(frame)` exempts cells from `orient`'s velocity rotation (`'velocity'` draws them unrotated,
+    `'camera-velocity'` as plain `'camera'` billboards) while still recording their heading.
+  - Ignored, with one development warning, on the default sphere or with a non-positive grid.
+- **`orient: 'camera-velocity'`** — the `'camera'` billboard rolled in the screen plane so local +X points along the
+  velocity as projected onto the camera's right / up axes: screen-aligned sprites, exact pixel size under an
+  orthographic camera, still facing their heading. Square roots only (no trig), allocation-free, the camera read once
+  per frame. No on-screen extent → unrolled; zero velocity keeps the last heading.
+- **Exports**: `FRAME_ATTRIBUTE` (`'bulletFrame'`), `OUTLINE_DIRECTION_ATTRIBUTE` (`'outlineDirection'`, previously
+  hard-coded by consumers building their own flat shapes), type `BulletFrames`. The barrel's exact-export list gains
+  the two constants.
+
+#### Performance
+
+Fastest of 30 frames over 2,000 moving bullets (test-renderer overhead included), three runs:
+`orient="camera-velocity"` with `frames` (half the cells upright) costs 1.45–1.66× `orient="none"` on the default
+sphere; the perf suite bounds it at 3×. The allocation suite's new case (atlas + alpha outline + camera-velocity)
+constructs nothing per frame.
+
+#### Tests
+
+385 → 408. New `frames.test.tsx` (grid validation; the vertex and outline patches against three's real `ShaderLib`;
+the material patch's chaining, cache key, defines and restore; the geometry view's sharing and its dispose never
+listing shared buffers; the writer's screen-heading math at eight headings including the antiparallel one, stops,
+headings at the camera, `upright` in both velocity modes; mounted fields — external and owned — writing each bullet's
+cell from its payload at both write sites, following `setPayload`, the outline's `OUTLINE_FRAMES`, removal restoring
+the consumer's geometry and material, the sphere warning, `<BulletManager>` forwarding), a perf case and an alloc case.
+
+---
+
+## 0.6.0
 
 ### Headless simulation core; `<BulletField>` renders external simulations
 
