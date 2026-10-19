@@ -104,6 +104,7 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
       geometry,
       orient,
       outline,
+      frames,
     },
     ref,
   ) {
@@ -184,6 +185,7 @@ export const BulletManager = forwardRef<BulletManagerHandle, BulletManagerProps>
         geometry={geometry}
         orient={orient}
         outline={outline}
+        frames={frames}
       >
         <Emitter
           ref={emitterRef}

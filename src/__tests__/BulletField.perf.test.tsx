@@ -9,6 +9,7 @@ import {
   type BulletFieldProps,
 } from '../BulletField';
 import { acquire } from '../pool';
+import { bulletGeometry } from '../render/geometry';
 import type { BulletSpawnData, PatternFactory } from '../types';
 
 /**
@@ -400,6 +401,7 @@ describe('BulletField — orientation stays within a sane per-frame budget', () 
 
   async function mountOriented(
     orient: NonNullable<BulletFieldProps['orient']>,
+    extra: Partial<BulletFieldProps> = {},
   ): Promise<{ renderer: Renderer; field: () => BulletFieldHandle }> {
     let ref: React.RefObject<BulletFieldHandle | null> | null = null;
     const Wrapper = () => {
@@ -412,6 +414,7 @@ describe('BulletField — orientation stays within a sane per-frame budget', () 
           maxBullets={N}
           boundsLimit={1000}
           orient={orient}
+          {...extra}
         />
       );
     };
@@ -462,5 +465,22 @@ describe('BulletField — orientation stays within a sane per-frame budget', () 
     const [tNone, tCam] = await fastestFrame(none.renderer, cam.renderer);
     expect(tNone).toBeGreaterThan(0);
     expect(tCam).toBeLessThan(tNone * 2.5);
+  }, 30_000);
+
+  // 0.7.0: the sprite-atlas path a pixel-art game uses — a quad, a frame per
+  // bullet from its payload (half of them upright), and the screen-heading
+  // roll. Measured 1.45–1.66× 'none' over 3 runs (fastest of 30, unloaded);
+  // the extra over 'camera' is one callback pair, one attribute store and one
+  // roll quaternion per bullet. Bound 3×.
+  it("orient='camera-velocity' + frames over 2,000 bullets costs under 3× orient='none'", async () => {
+    const none = await mountOriented('none');
+    const framed = await mountOriented('camera-velocity', {
+      geometry: bulletGeometry.quad(),
+      frames: { columns: 4, rows: 4, frame: (_i, p) => p & 15, upright: (f) => (f & 1) === 1 },
+    });
+    const [tNone, tFramed] = await fastestFrame(none.renderer, framed.renderer);
+    expect(tNone).toBeGreaterThan(0);
+    expect(tFramed).toBeLessThan(tNone * 3);
+    expect(framed.field().activeCount).toBe(N);
   }, 30_000);
 });

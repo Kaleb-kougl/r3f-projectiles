@@ -71,13 +71,16 @@ export type { StepMode } from './stepping';
 export type { EmitterHandle } from './Emitter';
 
 // Rendering: bullet geometry, orientation, outlines (0.5.0)
-export { bulletGeometry } from './render/geometry';
+export { bulletGeometry, OUTLINE_DIRECTION_ATTRIBUTE } from './render/geometry';
 export type {
   ArrowGeometryOptions,
   DiamondGeometryOptions,
 } from './render/geometry';
 export type { BulletOrient } from './render/orient';
 export type { BulletOutline, OutlineMode } from './render/outline';
+// Rendering: per-bullet sprite frames from one atlas (0.7.0)
+export { FRAME_ATTRIBUTE } from './render/frames';
+export type { BulletFrames } from './render/frames';
 
 // Utilities
 export { ProjectileTelemetry } from './ProjectileTelemetry';

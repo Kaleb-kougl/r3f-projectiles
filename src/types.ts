@@ -9,6 +9,7 @@ import type { EasingFn, EasingName } from './easing';
 import type { StepMode } from './stepping';
 import type { BulletOrient } from './render/orient';
 import type { BulletOutline } from './render/outline';
+import type { BulletFrames } from './render/frames';
 
 export type { EasingFn, EasingName };
 
@@ -121,7 +122,8 @@ export interface BulletManagerProps {
 
   /**
    * How each bullet is rotated: `'none'`, `'velocity'` (local +X along the
-   * current velocity) or `'camera'` (billboard). @default 'none'
+   * current velocity), `'camera'` (billboard) or `'camera-velocity'`
+   * (billboard turned toward the on-screen velocity, 0.7.0). @default 'none'
    */
   orient?: BulletOrient;
 
@@ -130,6 +132,12 @@ export interface BulletManagerProps {
    * that shares this manager's instance matrices. Omit for none.
    */
   outline?: BulletOutline;
+
+  /**
+   * Per-bullet sprite frames from one atlas (0.7.0). Same as
+   * `<BulletField frames>`; needs `geometry`.
+   */
+  frames?: BulletFrames;
 
   /**
    * Seconds of fade-out at the end of a bullet's life. The bullet renders at full
