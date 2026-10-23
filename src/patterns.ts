@@ -13,6 +13,10 @@ export type { PayloadLayout, PayloadSchema, PayloadValues } from './payload';
 // along for the same reason: it is pattern-side and imports nothing.
 export { createSeededRandom } from './rng';
 
+// Deterministic sin / cos (0.8.0): pattern-side, imports nothing.
+export { detSin, detCos, detSinCos, DETMATH_RANGE } from './detmath';
+export type { SinCos } from './detmath';
+
 // ---------------------------------------------------------------------------
 // Module-scope scratch objects — allocated ONCE, never inside a hot path.
 // ---------------------------------------------------------------------------

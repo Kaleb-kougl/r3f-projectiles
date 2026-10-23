@@ -29,6 +29,10 @@ export type {
 export { gen, mod, compose } from './patterns';
 // Seeded generator for deterministic `gen.galaxy` / `gen.rose3D` (0.6.0).
 export { createSeededRandom } from './rng';
+// Deterministic sin / cos, bit-identical on every engine (0.8.0). Also on
+// `/patterns`, `/core` and their own `/detmath` entry.
+export { detSin, detCos, detSinCos, DETMATH_RANGE } from './detmath';
+export type { SinCos } from './detmath';
 export { BUILTIN_PATTERNS, resolvePattern } from './presets';
 
 // Payload bitfields — several small fields in the one per-bullet integer.

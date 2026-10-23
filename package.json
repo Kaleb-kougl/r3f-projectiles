@@ -54,6 +54,16 @@
         "types": "./dist/core.d.cts",
         "default": "./dist/core.cjs"
       }
+    },
+    "./detmath": {
+      "import": {
+        "types": "./dist/detmath.d.ts",
+        "default": "./dist/detmath.js"
+      },
+      "require": {
+        "types": "./dist/detmath.d.cts",
+        "default": "./dist/detmath.cjs"
+      }
     }
   },
   "files": [
