@@ -6,7 +6,111 @@ were published without tags, so the packaged tarballs are the only record of tho
 
 ---
 
-## Unreleased (0.7.0)
+## Unreleased (0.8.0)
+
+### Deterministic sin and cos; every built-in pattern bit-identical across engines
+
+For games that replay or lockstep across browsers: until now every `gen.arc` burst went through `Math.sin` /
+`Math.cos`, which ECMAScript leaves implementation-approximated, so a run recorded in Chrome was not promised to
+replay bit-for-bit in Firefox or Safari. The library now has its own sine and cosine, built only from exactly
+specified operations, and every built-in generator and modifier runs on them. Same signatures, same shapes; in Node
+the same bits as 0.7.0.
+
+#### Added
+
+- **`@k9kbdev/r3f-projectiles/detmath`** — `detSin(x)`, `detCos(x)`, `detSinCos(x, out)` (writes `out.s` / `out.c`
+  from one range reduction and returns `out`; allocates nothing), `DETMATH_RANGE` (`2^18 · π` ≈ 823,549.66, the end
+  of the accurate range) and type `SinCos`. Also exported from the root, `/patterns` and `/core`. The entry imports
+  no package: no `three`, no React.
+  - A port of fdlibm 5.3: `e_rem_pio2`'s medium path (three-part Cody–Waite reduction by π/2, both refinement
+    rounds), `k_sin`, `k_cos`, coefficients and Horner order unchanged. It uses only `+ − × ÷`, `Math.sqrt`,
+    `Math.abs`, `Math.floor` and reads of a double's bits, all exactly specified, and JavaScript never contracts a
+    multiply-add, so the bits are the same on every conforming engine. Constants are double literals with their
+    exact bits in a comment (a test checks each one).
+  - **Accuracy**: within 1 ulp of the correctly rounded value for `|x| ≤ DETMATH_RANGE`. Checked against 4,705
+    references computed with mpmath at 200 bits (`scripts/gen-sincos-fixtures.py`, committed, not run in CI): max
+    1 ulp, 87 sines and 108 cosines at 1 ulp, every other value correctly rounded.
+  - **Beyond `DETMATH_RANGE`** (finite `|x| > DETMATH_RANGE`) `x` is first reduced as `x % (2 * Math.PI)` (ECMAScript's
+    `%` is exact, so the same double on every engine), then takes the in-range path: `detSin(x)` is
+    `detSin(x % (2 * Math.PI))` bit for bit. The result is deterministic, finite and in `[-1, 1]` for every finite
+    input (`sin² + cos²` within 1e-15 of 1), but it is **not the true sine of `x`**: the double `2 * Math.PI` is about
+    2.45e-16 short of 2π, so the error grows as about `|x| · 3.9e-17` (≈ 3e-11 just past the range, ≈ 0.35 at 2^53),
+    and past ~2^56 the value has no useful relation to `sin(x)`. Development builds warn once.
+  - `NaN` and `±Infinity` give `NaN` (the literal, never an arithmetic NaN, whose bits vary by engine and CPU); the
+    sign of zero is kept; `detSin(0) === 0`, `detCos(0) === 1`. A NaN's bit pattern is never portable in JavaScript
+    (an engine may store any NaN encoding in a typed array or `DataView`), so a hash over doubles must canonicalize
+    NaN — as `hashState()` now does (below).
+  - **Its bits are part of the version contract.** A release that changes any `detSin` / `detCos` output, or any
+    built-in pattern's, is at least a minor bump with a "Changed" line here.
+- **Guard rails**: lint bans the transcendental `Math` functions in `src/` outside `render/` (drawing only) — also
+  reached as `globalThis.Math` / `window.Math` / `self.Math` — and three's methods that run trig internally
+  (`setFromAxisAngle`, `applyAxisAngle`, `setFromEuler` / `applyEuler`, `angleTo` / `angle`, `rotateAround`,
+  `makeRotationX` / `Y` / `Z` / `Axis` / `FromEuler`, `setFromSpherical(Coords)` / `setFromCylindrical(Coords)` /
+  `setFromCartesianCoords`, `new Spherical` / `new Cylindrical`, `slerp` / `slerpQuaternions`, `rotateTowards`;
+  `applyQuaternion` for its op order). A test scans the built `/patterns`, `/core` and `/detmath` bundles for them,
+  so one pulled in through an import still fails.
+- The fdlibm notice is a legal comment (`/*!`) in `src/detmath.ts`, so it ships in the built chunk that holds
+  `detSin` (esbuild keeps legal comments at the end of the file; `legalComments: 'eof'` is pinned in
+  `tsup.config.ts`, and a test checks it).
+- **Cross-engine CI**: the golden hashes of `detSinCos` (in range, and over 10,014 inputs beyond it) and of every
+  generator's spawn data are recomputed from the built bundle in Chromium, Firefox and WebKit and compared with
+  Node's.
+- The barrel's exact-export list gains `detSin`, `detCos`, `detSinCos` and `DETMATH_RANGE`.
+
+#### Changed
+
+- **Every built-in generator and modifier runs on det math** — `gen.arc`, `ring`, `fibonacciSphere`, `torusKnot`,
+  `galaxy`, `helix`, `rose3D`; `mod.rotate`, `accelerate` and the rest — and so does `<BulletField>`'s built-in
+  orbit. Same signatures, same operation order, same shapes. **In Node the spawn data is bit-identical to 0.7.0**,
+  because Node's `Math.sin` / `Math.cos` are an fdlibm port that agrees with det math bit for bit; a test checks this
+  exhaustively against a verbatim copy of 0.7.0's `gen` / `mod` (run with three r184; 0.7.0's modifiers took their
+  vector math from whichever `three` was installed), gated on a probe that `Math.sin` / `Math.cos` equal
+  `detSin` / `detCos` bit for bit, not on the engine's name. **In browsers and Electron it is not:** Chromium
+  (Chrome, Edge, Electron) takes a different libm path from Node's V8 build, and its `Math.sin` differs from `detSin`
+  in the last bit on about 3% of random inputs; Firefox and Safari have their own. There 0.8.0 differs from 0.7.0 in
+  the last bit for some bullets, and now equals Node's. **Recordings made with 0.7.0 in a browser or in Electron
+  won't replay bit-for-bit under 0.8.0** (only Node recordings do) — and from 0.8.0 on, one made anywhere replays
+  everywhere.
+- **`BulletSimulation.hashState()` canonicalizes NaN** (`/core`): every NaN — `0 / 0`,
+  `Infinity - Infinity`, any sign or payload — hashes as `0x7FF8000000000000`, without going through the buffer,
+  because a NaN's bits differ between engines and CPUs (V8 on x86 makes `fff8…`, JavaScriptCore `7ff8…`). Only states
+  holding a NaN hash differently from 0.7.0; every other state hashes to the same value. `writeStateHash` still
+  appends the raw numbers; canonicalize NaN in your own hash if it reads bits.
+- The README's determinism sections drop "keep `Math.sin`-based patterns to one engine build": the core and every
+  built-in pattern are bit-identical across engines for a given library version. `gen.galaxy` / `gen.rose3D` still
+  default to `Math.random`; seed them with `createSeededRandom`.
+- Easing curves multiply instead of calling `Math.pow`. `easeOutCubic` and `easeInOutCubic` can differ from 0.7.0 in
+  the last bit; the fade is render only and never changes a despawn.
+
+#### Notes
+
+- **Patterns no longer depend on your `three` version.** Generators and modifiers do their own vector arithmetic
+  (normalize, cross product, axis-angle quaternion and rotate, each op for op what three r184 does) and only store
+  into `Vector3` fields, so a `three` upgrade that rewrites a math method cannot move a bullet. `mod.rotate` still
+  normalizes the axis you pass in place, each time it runs.
+- `render/geometry.ts` keeps `Math.hypot`: it builds geometry and never runs in a step.
+- Not added: `detAtan2`, `detPow`. Nothing in the library needs them; they come on demand.
+
+#### Tests
+
+New: `detmath.test.ts` (every fixture within 1 ulp, special values, the constants against their bit comments, a
+golden FNV-1a hash over 1,000,000 seeded `detSinCos` results; beyond the range, a sweep over every binade up to
+`±MAX_VALUE` — finite, in `[-1, 1]`, `sin² + cos²` within 1e-15 of 1, equal to `detSin(x % (2π))` bit for bit — and
+a golden hash over it), `core.simulation.test.ts` (NaN in position or payload, made nine ways (literal, `0 / 0`, `Infinity - Infinity`, `Math.sqrt(-1)`,
+DataView-crafted with sign and payload bits), hashes to one fixed
+value), `bundle.detmath.test.ts` (no trig in the det bundles; the fdlibm notice in the built chunk),
+`detmath.bench.test.ts` (100,000 `gen.arc` bursts vs 0.7.0: typically 1.2–1.35×, asserted ≤ 2.0× as a
+gross-regression guard since the ratio swings with V8's inlining), `patterns.detmath.test.ts` (0.7.0 equivalence over
+counts 1–64 and edge-case spreads, headings, axes and angles — `Object.is` where `Math.sin` is fdlibm (Node),
+≤ 2 ulp elsewhere; a golden hash
+over every field of 28 fixed generator and modifier calls, run with three's `Vector3` / `Quaternion` math methods
+poisoned and `Math.sin` / `Math.cos` never called), the `/detmath` entry check in `core.entry.test.ts`, and the
+cross-engine run. Existing tests changed only where they list exact exports (the barrel, the built `core.js`'s
+keys); none that pins a value moved.
+
+---
+
+## 0.7.0
 
 ### Sprite atlases: per-bullet frames; screen-facing velocity billboards
 

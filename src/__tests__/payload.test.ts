@@ -106,6 +106,24 @@ describe('definePayload — 31 bits, all usable, all non-negative', () => {
     expect(Wide.with(p, 'id', 5)).toBe(5);
   });
 
+  it('gives every width 1 … 31 the mask `2 ** width - 1` exactly (the source avoids `**`)', () => {
+    for (let width = 1; width <= 31; width++) {
+      const expected = 2 ** width - 1;
+      const L = definePayload({ low: width });
+      expect(L.max('low')).toBe(expected);
+      expect(L.pack({ low: expected })).toBe(expected);
+      expect(L.get(expected, 'low')).toBe(expected);
+      // The mask also bounds `get`: a set bit just above the field is dropped.
+      if (width < 31) expect(L.get(expected + (expected + 1), 'low')).toBe(expected);
+      // Same width at a shifted position: the mask is applied after the shift.
+      if (width <= 30) {
+        const S = definePayload({ pad: 1, f: width });
+        expect(S.max('f')).toBe(expected);
+        expect(S.get(S.pack({ f: expected }), 'f')).toBe(expected);
+      }
+    }
+  });
+
   it('keeps bit 31 clear in with(), even on a payload this layout did not produce', () => {
     expect(Shot.with(-1, 'damage', 0)).toBeGreaterThanOrEqual(0);
   });

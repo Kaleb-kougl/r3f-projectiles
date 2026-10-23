@@ -153,9 +153,10 @@ export interface BulletSimulationOptions {
  * doubles. Nothing reads a clock, a frame, a renderer or `Math.random`. The
  * inputs must be deterministic too: patterns that call `Math.random`
  * (`gen.galaxy` and `gen.rose3D` without an `rng`, and the `'galaxy'` /
- * `'rose3D'` presets) are not, and `Math.sin` / `Math.cos` (the built-in
- * generators use them) are only reproducible within one JS engine build on
- * one platform. See the README's "Headless simulation".
+ * `'rose3D'` presets) are not, and a custom pattern built on `Math.sin` /
+ * `Math.cos` is only reproducible within one JS engine build on one platform.
+ * The built-in generators and modifiers use `detSin` / `detCos` (0.8.0), which
+ * give the same bits on every engine. See the README's "Headless simulation".
  *
  * ## Slot indices
  * Every per-bullet accessor takes a **slot index** in `[0, capacity)` — the
@@ -258,15 +259,19 @@ export interface BulletSimulation {
    * ten numbers per bullet: `index, x, y, z, vx, vy, vz, life, payload,
    * emitterId`. Nothing else is appended, so `out.length` grows by exactly
    * `10 × activeCount`. Feed it to your own state hash; two simulations that
-   * agree bit-for-bit append identical sequences. `O(highWater)`. Allocates
-   * only if `out` has to grow.
+   * agree bit-for-bit append identical sequences. If your hash reads raw
+   * bits, canonicalize NaN first (`v !== v`): a NaN's bit pattern is not
+   * portable between engines. `O(highWater)`. Allocates only if `out` has to
+   * grow.
    */
   writeStateHash(out: number[]): void;
   /**
    * A 32-bit hash of the same values {@link writeStateHash} writes (plus the
    * live count), over their exact IEEE-754 bits — so `0` and `-0`, or two
-   * doubles one ulp apart, hash differently. For replay checks and desync
-   * detection; not cryptographic. Allocates nothing.
+   * doubles one ulp apart, hash differently. Every NaN hashes as the one
+   * canonical NaN (`0x7FF8000000000000`), since a NaN's bits are not portable
+   * between engines. For replay checks and desync detection; not
+   * cryptographic. Allocates nothing.
    */
   hashState(): number;
 
@@ -392,8 +397,29 @@ const _hashView = new DataView(new ArrayBuffer(8));
 const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 
-/** Fold one double's exact bits into a running 32-bit FNV-style hash. */
+/**
+ * The canonical quiet NaN, `0x7FF80000_00000000`, as the two words
+ * {@link mixDouble} folds (low word first, as the little-endian reads below).
+ */
+const NAN_LO = 0x00000000;
+const NAN_HI = 0x7ff80000;
+
+/**
+ * Fold one double's exact bits into a running 32-bit FNV-style hash.
+ *
+ * Every NaN folds as the one canonical NaN, without passing through the
+ * buffer: a NaN's bit pattern is not portable in JavaScript (an arithmetic
+ * NaN's sign and payload depend on the engine and the CPU, and writing a NaN
+ * to a DataView may store any NaN encoding — ECMAScript's SetValueInBuffer
+ * leaves the choice to the implementation), so hashing raw bits would let a
+ * state holding a NaN hash differently per engine. Every non-NaN double is
+ * hashed by its exact bits, as before.
+ */
 function mixDouble(h: number, v: number): number {
+  if (v !== v) {
+    h = Math.imul(h ^ NAN_LO, FNV_PRIME);
+    return Math.imul(h ^ NAN_HI, FNV_PRIME);
+  }
   _hashView.setFloat64(0, v, true);
   h = Math.imul(h ^ _hashView.getUint32(0, true), FNV_PRIME);
   return Math.imul(h ^ _hashView.getUint32(4, true), FNV_PRIME);

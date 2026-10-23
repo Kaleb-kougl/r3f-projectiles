@@ -43,6 +43,12 @@ describe('Public API Barrel File (index.ts)', () => {
       'createBulletSimulation',
       'createSeededRandom',
 
+      // Deterministic sin / cos (0.8.0), also on /patterns, /core, /detmath
+      'detSin',
+      'detCos',
+      'detSinCos',
+      'DETMATH_RANGE',
+
       // Rendering (0.7.0): per-bullet sprite frames; the outline attribute
       // name custom flat geometries need for an even 'extrude' rim
       'FRAME_ATTRIBUTE',

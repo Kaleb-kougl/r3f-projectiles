@@ -131,9 +131,35 @@ describe('@k9kbdev/r3f-projectiles/core — React-free as built', () => {
     }
   });
 
+  it('package.json maps ./detmath to the built files, with types, and it runs', async () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const map: Record<string, Record<string, string>> = pkg.exports['./detmath'];
+    expect(map).toEqual({
+      import: { types: './dist/detmath.d.ts', default: './dist/detmath.js' },
+      require: { types: './dist/detmath.d.cts', default: './dist/detmath.cjs' },
+    });
+    for (const cond of Object.values(map)) {
+      for (const p of Object.values(cond)) {
+        expect(fs.existsSync(path.join(OUT, p.replace('./dist/', '')))).toBe(true);
+      }
+    }
+    expect([...closure('detmath.js').bare]).toEqual([]);
+    const det = await load(url.pathToFileURL(path.join(OUT, 'detmath.js')).href);
+    expect(Object.keys(det).sort()).toEqual(['DETMATH_RANGE', 'detCos', 'detSin', 'detSinCos']);
+    expect(det.detSin(0)).toBe(0);
+    expect(det.detCos(0)).toBe(1);
+  });
+
   it('the built core.js runs a simulation', async () => {
     const core = await load(url.pathToFileURL(path.join(OUT, 'core.js')).href);
-    expect(Object.keys(core).sort()).toEqual(['createBulletSimulation', 'createSeededRandom']);
+    expect(Object.keys(core).sort()).toEqual([
+      'DETMATH_RANGE',
+      'createBulletSimulation',
+      'createSeededRandom',
+      'detCos',
+      'detSin',
+      'detSinCos',
+    ]);
     const sim = core.createBulletSimulation({ maxBullets: 100 });
     expect(sim.fireAt({ x: 0, y: 0, z: 0 }, 'ring')).toBe(100);
     sim.step(1 / 60);

@@ -30,6 +30,7 @@ export default function App() {
 - **Yours to Collide**: `forEachActive` walks live bullets so hit detection stays in your code, and an opaque `payload` integer carries whatever per-bullet state the library shouldn't know about — packed into named bitfields with `definePayload` if you need more than one number.
 - **Fixed-Step Ready**: `stepMode="manual"` takes the simulation off the render clock. Your fixed-timestep loop calls `step(dt)`; the field uploads once per frame. Same inputs, same bullets — bit for bit, however the steps fall into frames.
 - **Headless When You Need It**: `createBulletSimulation()` from the React-free `/core` entry is the bullet simulation itself — the very code `<BulletField>` runs — with no React, renderer or DOM. Step it from your own fixed tick, replay it in a plain function, hash it for desync checks, and draw it with `<BulletField simulation={sim} />`. See [Headless simulation](#headless-simulation-games-with-a-fixed-tick).
+- **Same Bits on Every Engine**: every built-in generator and modifier runs on the library's own sine and cosine (a port of fdlibm) instead of `Math.sin` / `Math.cos`, so a burst's spawn data is bit-identical in Chrome, Firefox, Safari and Node for a given library version. The same functions are yours from `/detmath`. See [Deterministic sin and cos](#deterministic-sin-and-cos-detmath).
 - **Near-Zero Allocation**: I create scratch `Object3D`, `Vector3`, and `Color` objects once and reuse them every frame, so nothing is allocated per bullet. Three per-burst/per-flush exceptions are named under [Near-Zero-Allocation Render Loop](#near-zero-allocation-render-loop). No garbage collection spikes.
 - **Object Pooling**: `acquire()` and `releaseSpawnData()` recycle object state to eliminate allocation pressure.
 - **Shaped, Aimed, Outlined**: Swap the sphere for any geometry (`bulletGeometry.arrow()`, a textured sprite quad, your own mesh), point each bullet along its velocity or at the camera with `orient`, and draw a readable dark rim with `outline` — one extra draw call, no extra per-bullet work.
@@ -477,7 +478,10 @@ What that claim rests on, stated rather than implied:
 
 - **Your inputs have to be identical too.** `origin` refs and `boundsCenter` are read at step time, so update them inside your fixed step, not in a render-rate callback. Prop changes (`fireRate`, `pattern`, `boundsLimit`) take effect at the first step after React commits them, which is a render-timing input — anything cadence-critical belongs in your own fixed step, through `fireAt`.
 - **Patterns have to be deterministic.** `gen.galaxy` and `gen.rose3D` — and so the built-in `'galaxy'` and `'rose3D'` presets — call `Math.random()` by default. Both take an optional last argument, `rng: () => number`: pass `createSeededRandom(seed)` (exported from the root, `/patterns` and `/core`) and they replay exactly. The presets themselves stay random.
-- **Same engine, same platform.** `+ − × ÷` are exactly rounded IEEE-754 double operations in every conforming JavaScript engine. The `Math` functions are not: the spec leaves them implementation-approximated, and while `Math.sqrt` is correctly rounded in practice everywhere, `Math.sin`, `Math.cos`, `Math.atan2`, `Math.pow` and friends genuinely differ between engines, engine versions, and CPU architectures. The built-in orbit and most generators use them. So bit-identical holds within one browser/runtime build on one platform — a replay on the machine that recorded it, or peers on the same browser — and is **not** a promise across Chrome vs Firefox vs Safari. Cross-engine lockstep needs authoritative state sync on top.
+- **Across engines, for a given library version.** `+ − × ÷` and `Math.sqrt` are correctly rounded IEEE-754 double operations in every conforming JavaScript engine, and JavaScript never fuses a multiply and an add, so a fixed sequence of them gives the same bits everywhere. `Math.sin`, `Math.cos`, `Math.atan2`, `Math.pow` and friends carry no such promise: the spec leaves them implementation-approximated, and they do differ between engines. Since 0.8.0 nothing on the simulation path calls them. The core's motion and culling use only the exact operations, and the built-in orbit and every built-in generator and modifier run on the library's [deterministic sin and cos](#deterministic-sin-and-cos-detmath) and on its own vector arithmetic, so the same inputs give the same bullets in V8 (Chrome, Node, Electron), SpiderMonkey (Firefox) and JavaScriptCore (Safari, iOS). The pattern math uses no `three` math methods either, so its results do not change with the `three` you have installed.
+- **How that is held in place.** Lint bans the transcendental `Math` functions in `src/` outside the renderer, which only draws; a test scans the built `/patterns` and `/core` bundles for them, which catches one pulled in through an import; and CI recomputes golden hashes of the sine / cosine and of every generator's spawn data in Chromium, Firefox and WebKit and compares them with Node's.
+- **The bits belong to the version.** A library release that changes any det-math or pattern output is at least a minor bump, with a "Changed" line in the [changelog](./CHANGELOG.md). A recording made with one version replays bit-for-bit under that version, not necessarily under the next minor.
+- **Your own code is still yours.** A custom pattern or a tick that calls `Math.sin`, `Math.atan2` or `Math.pow` is back to one engine build. Use `detSin` / `detCos` / `detSinCos` for angles, and multiplications for integer powers.
 - **It is a claim about simulation state, not pixels.** Positions are doubles; the GPU receives float32 instance matrices.
 
 ---
@@ -606,8 +610,8 @@ export function Bullets({ game }: { game: Game }) {
 | `activeCount` / `activeCountFor(id)` | `number` / `(id: number) => number` | Live bullets, delayed ones included. |
 | `forEachActive(cb)` | `(cb: (i, pos, payload, emitterId) => boolean \| void) => void` | Walk live, visible bullets; return `true` to consume. Reentrant for `fireAt` and `setPayload`. |
 | `setPayload(i, payload)` | `(index: number, payload: number) => void` | Write-back half of `forEachActive`. Ignored for a slot that is not live. |
-| `writeStateHash(out)` | `(out: number[]) => void` | Append `index, x, y, z, vx, vy, vz, life, payload, emitterId` for every live bullet, ascending slot order. Feed it to your own hash. |
-| `hashState()` | `() => number` | A 32-bit hash over the exact bits of the same values (plus the live count). For replay checks and desync detection; not cryptographic. |
+| `writeStateHash(out)` | `(out: number[]) => void` | Append `index, x, y, z, vx, vy, vz, life, payload, emitterId` for every live bullet, ascending slot order. Feed it to your own hash (canonicalize NaN if it reads raw bits: a NaN's bit pattern is not portable between engines). |
+| `hashState()` | `() => number` | A 32-bit hash over the exact bits of the same values (plus the live count); every NaN hashes as the canonical `0x7FF8000000000000`. For replay checks and desync detection; not cryptographic. |
 | `stepCount` | `number` | Steps taken. A free tick counter. |
 | `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `onPoolExhausted` | mutable | As the options; read at step time. `boundsCenter` takes a `{ current }` ref, a getter, or a live vector. |
 | `capacity`, `interpolation` | `number`, `boolean` | Fixed at creation. |
@@ -638,9 +642,43 @@ The rules all follow from "the simulation is yours":
 
 #### What determinism covers here
 
-Everything under [Deterministic stepping](#deterministic-stepping) applies, with the simulation in place of the field: the same options and the same sequence of `step`, `fireAt`, `clear`, `forEachActive` consumptions, `setPayload`, `acquireEmitter`/`releaseEmitter` and config writes give bit-identical state — tested with two simulations, and with one rendered under four frame groupings (interpolated, at that) against one never rendered at all. Rendering never feeds back. Seed `gen.galaxy` / `gen.rose3D` with `createSeededRandom`, keep `Math.sin`-based patterns to one engine build, and read `origin`s and `boundsCenter` from your tick, not from a render callback.
+Everything under [Deterministic stepping](#deterministic-stepping) applies, with the simulation in place of the field: the same options and the same sequence of `step`, `fireAt`, `clear`, `forEachActive` consumptions, `setPayload`, `acquireEmitter`/`releaseEmitter` and config writes give bit-identical state — tested with two simulations, and with one rendered under four frame groupings (interpolated, at that) against one never rendered at all. Rendering never feeds back. The core and every built-in pattern are bit-identical across engines for a given library version, so a replay recorded in Chrome replays in Safari. Seed `gen.galaxy` / `gen.rose3D` with `createSeededRandom` (they still use `Math.random` by default), and read `origin`s and `boundsCenter` from your tick, not from a render callback.
 
 Not here yet, stated rather than implied: there is **no `snapshot()` / `restore()`** — a rollback netcode that rewinds the simulation has to re-simulate from a known input, not restore a saved pool — and **capacity is fixed** at creation.
+
+---
+
+### Deterministic sin and cos (`/detmath`)
+
+The sine and cosine the patterns run on are public, for the angles in your own simulation: a turret's rotation pair, a homing turn, a wave's sway. Use them anywhere a value feeds your state hash.
+
+```ts
+import { detSinCos, type SinCos } from '@k9kbdev/r3f-projectiles/detmath';
+
+const sc: SinCos = { s: 0, c: 0 };   // module scope: reused, never reallocated
+
+// In your fixed tick: turn a heading into a direction (0 = +Z, toward +X, as gen.arc).
+detSinCos(turret.heading, sc);
+turret.dir.x = sc.s;
+turret.dir.z = sc.c;
+```
+
+| Export | Signature | Description |
+|---|---|---|
+| `detSin` | `(x: number) => number` | Sine of `x` radians. |
+| `detCos` | `(x: number) => number` | Cosine of `x` radians. |
+| `detSinCos` | `(x: number, out: SinCos) => SinCos` | Both from one range reduction, written into `out.s` / `out.c` and returned. Bit for bit `out.s === detSin(x)` and `out.c === detCos(x)`. Allocates nothing. |
+| `DETMATH_RANGE` | `number` | `2^18 · π` ≈ 823,549.66, the end of the accurate range. |
+| `SinCos` | type | `{ s: number; c: number }`. |
+
+- **Same bits on every engine.** It is a port of fdlibm 5.3 (`e_rem_pio2`'s medium path, a three-part Cody–Waite reduction by π/2 with both refinement rounds, then `k_sin` / `k_cos`), built only from `+ − × ÷`, `Math.sqrt`, `Math.abs`, `Math.floor` and reads of a double's bits. Every one of those is exactly specified, so any conforming engine gives the same result.
+- **Accurate.** Within 1 ulp of the correctly rounded value for `|x| ≤ DETMATH_RANGE`, checked against 4,705 references computed with mpmath at 200 bits: the worst case is 1 ulp (87 sines and 108 cosines), and every other value is correctly rounded. Node's own `Math.sin` / `Math.cos` are an fdlibm port too, and they matched these bit for bit on every reference and on a million random inputs (checked on Node 22), which is why the patterns' output did not move in Node. Chromium's (Chrome, Edge, Electron) are not the same: they differ from `detSin` in the last bit on about 3% of random inputs, so in browsers and Electron, as in Firefox and Safari, some 0.8.0 bullets differ from 0.7.0's in the last bit (and now equal Node's).
+- **Beyond `DETMATH_RANGE`** (any finite `|x| > DETMATH_RANGE`), `x` is first reduced as `x % (2 * Math.PI)` — JavaScript's `%` is exact, so this is the same double on every engine — and the result is `detSin(x % (2 * Math.PI))` bit for bit. So it is deterministic, finite and in `[-1, 1]` for every finite input, with `sin² + cos²` as close to 1 as in range, **but it is not the true sine of `x`**: `2 * Math.PI` is the double nearest 2π, about 2.45e-16 short, so the result is off by up to about `|x| · 3.9e-17` (≈ 3e-11 just past the range, ≈ 0.35 at 2^53) and past ~2^56 it has no useful relation to `sin(x)`. Development builds warn once. Wrap long-running angles into range yourself.
+- **Edge cases.** `NaN` and `±Infinity` give `NaN` (the `NaN` literal, not an arithmetic NaN); the sign of zero is kept (`detSin(-0)` is `-0`); `detSin(0) === 0` and `detCos(0) === 1` exactly. A NaN's *bit pattern* is never portable in JavaScript — an engine may store any NaN encoding in a typed array or `DataView` — so if you hash doubles yourself, canonicalize NaN first, as `hashState()` does.
+- **Imports nothing**: no `three`, no React. `/detmath` is the smallest entry; the same exports are also on the root, `/patterns` and `/core`.
+- **Its bits are part of the version contract**, like the patterns': changing an output is at least a minor bump with a changelog line.
+
+There is no `atan2`, `pow` or `exp` yet. Nothing in the library needs them (integer powers are multiplications), and they will be added if someone does.
 
 ---
 
@@ -681,7 +719,7 @@ Generators yield pool-acquired `BulletSpawnData` arrays. Call `releaseSpawnData(
 
 Every other generator is omnidirectional, which makes `mod.rotate` a way to change a pattern's *phase* rather than its heading. `arc` is the one that points somewhere.
 
-Angles follow `ring`'s convention — `0` is `+Z`, increasing toward `+X` — so a direction is `(sin θ, 0, cos θ)`, and a heading comes back out of a direction via `Math.atan2(dir.x, dir.z)`. Note the argument order: `x, z`, not the usual `y, x`.
+Angles follow `ring`'s convention — `0` is `+Z`, increasing toward `+X` — so a direction is `(sin θ, 0, cos θ)`, and a heading comes back out of a direction via `Math.atan2(dir.x, dir.z)`. Note the argument order: `x, z`, not the usual `y, x`. (`Math.atan2` is not deterministic across engines: in a replayed tick, keep headings as data and turn them into directions with [`detSinCos`](#deterministic-sin-and-cos-detmath).)
 
 Two properties are worth knowing before tuning one:
 
@@ -705,7 +743,7 @@ Modifiers are curried. Call them with a configuration to receive a `Modifier` fu
 
 A payload is carried but never interpreted. The library has no idea what the number means; you read it back in `forEachActive` and decide. Keeping it a primitive rather than an object is what lets bullets stay pooled and allocation-free.
 
-> `mod.rotate` calls `axis.normalize()`, which mutates the vector you hand it. Pass a module-level unit constant, never one you just built — otherwise the second call operates on a vector the first one already changed.
+> `mod.rotate` normalizes `axis` in place each time it runs, which mutates the vector you hand it. Pass a module-level unit constant, never one you just built — otherwise the second call operates on a vector the first one already changed.
 
 ---
 
@@ -1243,9 +1281,10 @@ Access the raw pattern math as a standalone module independent of React and R3F:
 ```ts
 import { gen, mod, compose, definePayload, createSeededRandom } from '@k9kbdev/r3f-projectiles/patterns';
 import { createBulletSimulation } from '@k9kbdev/r3f-projectiles/core';
+import { detSin, detCos, detSinCos } from '@k9kbdev/r3f-projectiles/detmath';
 ```
 
-Both entries are React- and R3F-free *as built* — a test bundles the package with its own config and checks everything `core.js`, `core.cjs` and `core.d.ts` load, transitively, is `three` and nothing else.
+`/patterns` and `/core` are React- and R3F-free *as built* — a test bundles the package with its own config and checks everything `core.js`, `core.cjs` and `core.d.ts` load, transitively, is `three` and nothing else. `/detmath` loads nothing at all, not even `three`.
 
 ---
 
@@ -1263,3 +1302,11 @@ Both entries are React- and R3F-free *as built* — a test bundles the package w
 ## License
 
 MIT — [Kaleb Kougl](https://github.com/Kaleb-Kougl)
+
+### Third-party notice
+
+`src/detmath.ts` is a port of fdlibm 5.3 (netlib.org/fdlibm), whose notice is preserved there, in the built files (a legal comment at the end of the chunk that holds `detSin`) and in [LICENSE](./LICENSE):
+
+> Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+>
+> Developed at SunSoft, a Sun Microsystems, Inc. business. Permission to use, copy, modify, and distribute this software is freely granted, provided that this notice is preserved.

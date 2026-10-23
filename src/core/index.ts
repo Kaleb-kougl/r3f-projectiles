@@ -23,3 +23,8 @@ export type {
 } from './simulation';
 
 export { createSeededRandom } from '../rng';
+
+// Deterministic sin / cos (0.8.0), bit-identical on every engine. Imports
+// nothing; also on the `/detmath` entry.
+export { detSin, detCos, detSinCos, DETMATH_RANGE } from '../detmath';
+export type { SinCos } from '../detmath';
