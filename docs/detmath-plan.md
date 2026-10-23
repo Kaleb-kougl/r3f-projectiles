@@ -244,3 +244,18 @@ updated.
 | 2 | Accuracy | (a) fdlibm port, ≤ 1 ulp in range; (b) a shorter polynomial, ~1e−12 absolute error | **(a)**: the same cost class, a known-good reference, and shapes indistinguishable from `Math.sin` |
 | 3 | Proof across engines | (a) Node only; (b) Playwright Chromium + Firefox + WebKit in CI | **(b)**: it is the point of the change, and the only way to see JavaScriptCore before an iOS build does |
 | 4 | Game re-pin timing | (a) G1 as its own re-pin, before E3.6's B0; (b) folded into B0 | **(a)**: each re-pin keeps its own clean proof (outcome equality here, trace equality there) |
+
+## Status (2026-10-23)
+
+Library steps, on branches off `detmath` (not merged, not published):
+
+| Step | State |
+| --- | --- |
+| L1 det math, proofs | Done (bfd439a). `DETMATH_RANGE` = 2^18·π; 4,705 mpmath (200-bit) references, max 1 ulp (87 sin / 108 cos values at 1 ulp, the rest correctly rounded); golden hash over 1,000,000 `detSinCos` results |
+| L2 generators, modifiers | Done (e9e92a1). Better than planned: on V8 the spawn data is **bit-identical to 0.7.0** (V8's `Math.sin` is fdlibm), checked against a verbatim 0.7.0 copy; `vecmath.ts` replicates three **r184** (the installed version), not r186 |
+| L3 guard rails, L4 cross-engine CI | In progress in parallel |
+| L5 docs | Done: README determinism sections and a `/detmath` section, CHANGELOG `Unreleased (0.8.0)` (0.7.0's heading no longer "Unreleased"), the fdlibm notice appended to `LICENSE` and in the README, `package.json` version 0.8.0 |
+
+Left for Kaleb: merge, tag and publish 0.8.0. Then G1–G3 in Kaleb-Vale. Because 0.8.0 equals 0.7.0 bit for bit on
+V8, G1's equivalence report should show identical runs in Node and Electron (provided the game's three r186 keeps
+r184's `normalize` / `crossVectors` op order, which `mod.accelerate` replicates), so the re-pin may move no hashes.
