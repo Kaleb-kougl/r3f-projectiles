@@ -135,9 +135,11 @@ export function definePayload<const S extends PayloadSchema>(
       );
     }
     shifts[name] = bits;
-    // `2 ** width - 1` rather than `(1 << width) - 1`: the shift form goes
-    // negative at width 31.
-    masks[name] = 2 ** width - 1;
+    // `2 ** width - 1`, written as exact integer ops (the det-math lint bans
+    // `**`): the shift form is exact for widths 1 … 30 but goes negative at
+    // 31, so 31 takes the 31-bit constant. A wider field never gets a usable
+    // mask: the total-bits check below rejects its layout.
+    masks[name] = width >= MAX_BITS ? MAX_PAYLOAD : (1 << width) - 1;
     bits += width;
   }
   if (bits > MAX_BITS) {

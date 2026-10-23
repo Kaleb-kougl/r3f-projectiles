@@ -139,6 +139,7 @@ export const gen = {
     radius: number = 4,
     arms: number = 3,
     spin: number = 2,
+    // eslint-disable-next-line no-restricted-properties -- documented non-deterministic default
     rng: () => number = Math.random,
   ): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
@@ -218,6 +219,7 @@ export const gen = {
     count: number,
     k: number = 4,
     radius: number = 2,
+    // eslint-disable-next-line no-restricted-properties -- documented non-deterministic default
     rng: () => number = Math.random,
   ): BulletSpawnData[] {
     const spawns: BulletSpawnData[] = [];
