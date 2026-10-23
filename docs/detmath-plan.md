@@ -68,16 +68,18 @@ reference (L4).
 ### The det math module (`src/detmath.ts`, exported from the root, `/patterns` and `/core`)
 
 - `detSin(x)`, `detCos(x)`, `detSinCos(x, out)` (one range reduction for both; `out` is `{ s, c }`, no allocation).
-- **Method:** a port of fdlibm's medium-range path (fdlibm is the reference most libms derive from; V8's own
-  `Math.sin` is a port of it, which is why the results will match V8's closely):
+- **Method:** a port of fdlibm's medium-range path (fdlibm is the reference most libms derive from; Node's V8 build
+  ports it for `Math.sin`, which is why the results match Node's bit for bit — Chromium's `Math.sin` takes a
+  different libm path and differs in the last bit on ~3% of inputs):
   - range reduction by π/2 with a three-part Cody–Waite constant (`pio2_1`, `pio2_1t`, `pio2_2`, `pio2_2t`, `pio2_3`,
     `pio2_3t` as exact double literals): `n = Math.floor(x * invpio2 + 0.5)`, `r = ((x − n·p1) − n·p2) − n·p3` in that
     order;
   - the kernels `__kernel_sin` / `__kernel_cos` (degree 13 / 14 minimax polynomials, Horner order fixed in the
     source), the quadrant picked by `n & 3`.
 - **Accuracy (decision 2):** within 1 ulp of the correctly rounded result for |x| ≤ 2^19·π/2 (~823,550 rad; the game's
-  angles stay under ~8). Beyond that range the result is still **deterministic** (the same operations) but its accuracy
-  drops; dev builds warn once. `NaN` and `±Infinity` give `NaN`; `-0` stays `-0`; `detSin(0) === 0` and
+  angles stay under ~8). Beyond that range x is first reduced as `x % (2 * Math.PI)` (exact in ECMAScript), so the
+  result is still **deterministic** and in [-1, 1], but it is the sine of x minus a multiple of the *double* 2π, off
+  from sin(x) by up to ~|x|·3.9e-17; dev builds warn once (as built after review; see Status). `NaN` and `±Infinity` give `NaN`; `-0` stays `-0`; `detSin(0) === 0` and
   `detCos(0) === 1` exactly.
 - **Constants** are hex-exact double literals with a comment for each, never computed at load from `Math.*`.
   `Math.PI` itself is a fixed double and stays allowed.
@@ -130,7 +132,9 @@ Every `gen.*` and `mod.*` keeps its signature and meaning; only the arithmetic c
    `build-and-test`. The cloud container and GitHub's `ubuntu-latest` both run Playwright's WebKit build, the closest
    CI gets to Safari / iOS JavaScriptCore.
 4. **Not a speed regression:** a bench test, 100,000 `gen.arc(12, 2π, …)` bursts, within 1.5× of 0.7.0 (bursts are per
-   volley, never per frame; the polynomial costs a few dozen flops).
+   volley, never per frame; the polynomial costs a few dozen flops). *As built:* 1.5× is the target and is typically
+   met (1.2–1.35× on Node 22), but the ratio swings with V8's inlining (1.2–1.49× measured, ~1.6× when it does not
+   inline), so the test prints the numbers and asserts only ≤ 2.0×, a gross-regression guard.
 
 ### Versioning
 
@@ -252,10 +256,32 @@ Library steps, on branches off `detmath` (not merged, not published):
 | Step | State |
 | --- | --- |
 | L1 det math, proofs | Done (bfd439a). `DETMATH_RANGE` = 2^18·π; 4,705 mpmath (200-bit) references, max 1 ulp (87 sin / 108 cos values at 1 ulp, the rest correctly rounded); golden hash over 1,000,000 `detSinCos` results |
-| L2 generators, modifiers | Done (e9e92a1). Better than planned: on V8 the spawn data is **bit-identical to 0.7.0** (V8's `Math.sin` is fdlibm), checked against a verbatim 0.7.0 copy; `vecmath.ts` replicates three **r184** (the installed version), not r186 |
-| L3 guard rails, L4 cross-engine CI | In progress in parallel |
+| L2 generators, modifiers | Done (e9e92a1). Better than planned in Node: there the spawn data is **bit-identical to 0.7.0** (Node's `Math.sin` is an fdlibm port that agrees with det math bit for bit), checked against a verbatim 0.7.0 copy. Not in browsers or Electron: Chromium's `Math.sin` differs from `detSin` on ~3% of inputs, and Firefox / Safari have their own, so there 0.8.0 differs from 0.7.0 in the last bit for some bullets (and equals Node's). `vecmath.ts` replicates three **r184** (the installed version), not r186 |
+| L3 guard rails | Done (18da80c): ESLint rules, the bundle scan test |
+| L4 cross-engine CI, core pin | Done (2615108): `test:engines` (Chromium here; Firefox / WebKit skip when not installed, required under `CI=true`), the bench, the core reference pin |
 | L5 docs | Done: README determinism sections and a `/detmath` section, CHANGELOG `Unreleased (0.8.0)` (0.7.0's heading no longer "Unreleased"), the fdlibm notice appended to `LICENSE` and in the README, `package.json` version 0.8.0 |
 
-Left for Kaleb: merge, tag and publish 0.8.0. Then G1–G3 in Kaleb-Vale. Because 0.8.0 equals 0.7.0 bit for bit on
-V8, G1's equivalence report should show identical runs in Node and Electron (provided the game's three r186 keeps
-r184's `normalize` / `crossVectors` op order, which `mod.accelerate` replicates), so the re-pin may move no hashes.
+Review fixes (984d1cd), after an independent review:
+
+- **"Bit-identical to 0.7.0 on V8" was wrong.** Only Node's V8 build has fdlibm trig; Chromium 153's `Math.sin`
+  differs from `detSin` on ~3.3% of random inputs (`detSin` itself is identical in Node, Chromium and Bun/JSC).
+  CHANGELOG, README, source comments and the tests now say Node; the CHANGELOG says 0.7.0 recordings made in a
+  browser or Electron won't replay bit-for-bit under 0.8.0. The 0.7.0-equivalence test gates on a probe
+  (`MATH_IS_FDLIBM`: `Math.sin` / `Math.cos` equal `detSin` / `detCos` over the fixtures plus 5,000 seeded inputs),
+  not on `process.versions.v8`.
+- **Beyond `DETMATH_RANGE`** outputs left [-1, 1] (|v| up to 5.6 from ~2^54, -7.1e15 at 2^60, ±Infinity at 1e100,
+  NaN at 1e300 / MAX_VALUE). Now x is first reduced as `x % (2 * Math.PI)` (exact): finite, in [-1, 1],
+  `detSin(x) === detSin(x % (2 * Math.PI))`, not the true sine. In range nothing moved (fixture test, goldens
+  0x7b8d985b and 0x8c6d3dd6); new beyond-range golden 0xeb1d515f, also run by `test:engines`.
+- **NaN bits**: det math returns the `NaN` literal; the core's `hashState` (`mixDouble`) folds every NaN as
+  0x7FF8000000000000, so only states holding a NaN hash differently from 0.7.0.
+- Bench asserts ≤ 2.0× (above); lint also restricts three's other trig-backed methods (`angleTo`, `makeRotation*`,
+  `slerp`, `setFromSpherical*`, …), `new Spherical` / `new Cylindrical`, and `globalThis.Math` / `window.Math` /
+  `self.Math`; the fdlibm notice is a legal comment that ships in the built chunk (tested).
+
+Left for Kaleb: merge, tag and publish 0.8.0. Then G1–G3 in Kaleb-Vale. Because 0.8.0 equals 0.7.0 bit for bit in
+Node, G1's equivalence report should show identical runs in Node (provided the game's three r186 keeps r184's
+`normalize` / `crossVectors` op order, which `mod.accelerate` replicates), so Node-pinned hashes may not move.
+**Electron and browser runs can differ from 0.7.0 in the last bit** for some bursts (Chromium's `Math.sin` is not
+Node's): expect the equivalence report to show ulp-level spawn differences there, and treat any recording made with
+0.7.0 in Electron as not replayable under 0.8.0.
