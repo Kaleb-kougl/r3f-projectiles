@@ -38,8 +38,9 @@
 // Why this is deterministic: ECMAScript specifies `+ - * /` and `Math.sqrt`
 // as correctly rounded IEEE 754 double operations, `Math.abs` and
 // `Math.floor` exactly, and never contracts a multiply and an add into an FMA.
-// This file uses only those, comparisons, integer bit operations and a
-// DataView to read a double's high word (exact). A fixed sequence of them
+// This file uses only those, comparisons, integer bit operations, a
+// DataView to read a double's high word (exact) and Float64Array scratch
+// slots (which store a double exactly). A fixed sequence of them
 // gives the same bits on every conforming engine. `Math.sin` / `Math.cos` are
 // "implementation-approximated" by the spec and give no such guarantee.
 //
@@ -142,80 +143,122 @@ function warnOutOfRange(x: number): void {
 
 // ---- __ieee754_rem_pio2 (medium path) ------------------------------------------
 
-/** The reduced argument, `y[0]` / `y[1]` in fdlibm: x - n·pi/2 = _y0 + _y1. */
-let _y0 = 0;
-let _y1 = 0;
+/**
+ * The kernels' argument, as a head / tail pair: fdlibm's `y[0]` / `y[1]` after
+ * a reduction (x - n·pi/2 = `_y[0] + _y[1]`), or `x` and `0` when |x| ~<= pi/4.
+ * remPio2 also takes its x from `_y[0]`.
+ *
+ * ## Why the internal functions talk through typed arrays (performance only)
+ *
+ * The bits are the same either way; this is about allocation. V8 passes and
+ * returns JS values tagged, so a double crossing a call V8 did not inline —
+ * an argument or a return value — is boxed into a fresh heap number, and a
+ * double kept in a module-scope `let` is re-boxed on every write. Whether
+ * these helpers get inlined depends on the caller's inlining budget, which
+ * varies from run to run. With plain arguments and returns (0.8.0 L1/L2),
+ * `detmath.bench.test.ts`'s gen.arc bursts ran at ~1.6× of 0.7.0's
+ * Math.sin / Math.cos on Node 22, over the plan's 1.5× budget; laid out like
+ * this, ~1.2–1.3×. So the helpers take no double arguments and return no
+ * doubles: inputs and results live in two Float64Arrays (`_y` here, `_k` for
+ * the kernels' results), whose elements hold a double unboxed and exactly
+ * (every bit, -0 included).
+ */
+const _y = new Float64Array(2);
 
 /**
- * Reduce x (|x| > pi/4, finite) by pi/2: writes the remainder as the
- * head/tail pair `_y0` + `_y1` (|_y0| <= ~pi/4) and returns n, with
- * x ≈ n·pi/2 + remainder. `hx` is x's high word, `ix` the same without the
- * sign bit.
+ * Reduce x = `_y[0]` (|x| > pi/4, finite) by pi/2: overwrites `_y` with the
+ * remainder as the head/tail pair `_y[0]` + `_y[1]` (|_y[0]| <= ~pi/4) and
+ * returns the quadrant `n & 3`, with x ≈ n·pi/2 + remainder. (fdlibm tests
+ * the sign as `hx < 0`; for a nonzero, non-NaN x that is exactly `x < 0`.)
  *
- * Returned as a double: within the range `|n| < 2^20` and it is an integer;
- * callers take the quadrant with `n & 3`, which (ToInt32 being modular) is
- * well defined and engine-independent for any finite n.
+ * n itself is a double: within the range `|n| < 2^20` and an integer. The
+ * quadrant is `n & 3` (ToInt32 being modular, well defined and
+ * engine-independent for any finite n), taken here rather than by the callers
+ * so the return value is a small integer.
  */
-function remPio2(x: number, hx: number, ix: number): number {
+function remPio2(): number {
+  const x = _y[0];
+  const ix = highWord(x) & 0x7fffffff;
   const t = Math.abs(x);
   const fn = Math.floor(t * invpio2 + 0.5); // fdlibm 5.3: n = (int)(t*invpio2+half)
   let r = t - fn * pio2_1;
   let w = fn * pio2_1t; // 1st round, good to 85 bits
   const j = ix >> 20;
-  _y0 = r - w;
-  let i = j - ((highWord(_y0) >> 20) & 0x7ff);
+  let y0 = r - w;
+  let i = j - ((highWord(y0) >> 20) & 0x7ff);
   if (i > 16) {
     // 2nd round, good to 118 bits
     let tt = r;
     w = fn * pio2_2;
     r = tt - w;
     w = fn * pio2_2t - (tt - r - w);
-    _y0 = r - w;
-    i = j - ((highWord(_y0) >> 20) & 0x7ff);
+    y0 = r - w;
+    i = j - ((highWord(y0) >> 20) & 0x7ff);
     if (i > 49) {
       // 3rd round, good to 151 bits, covers all cases
       tt = r;
       w = fn * pio2_3;
       r = tt - w;
       w = fn * pio2_3t - (tt - r - w);
-      _y0 = r - w;
+      y0 = r - w;
     }
   }
-  _y1 = r - _y0 - w;
-  if (hx < 0) {
-    _y0 = -_y0;
-    _y1 = -_y1;
-    return -fn;
+  const y1 = r - y0 - w;
+  if (x < 0) {
+    _y[0] = -y0;
+    _y[1] = -y1;
+    return -fn & 3;
   }
-  return fn;
+  _y[0] = y0;
+  _y[1] = y1;
+  return fn & 3;
 }
 
 // ---- __kernel_sin / __kernel_cos -------------------------------------------------
 
+/** The kernels' results: `_k[0]` is kernelSin's, `_k[1]` kernelCos's (see `_y`). */
+const _k = new Float64Array(2);
+
 /**
- * fdlibm's `__kernel_sin(x, y, iy)`: sin(x + y) on |x| <= ~pi/4, with y the
- * tail of x (iy = 0 means y is 0).
+ * fdlibm's `__kernel_sin(x, y, iy)`: sin(x + y) on |x| <= ~pi/4, with
+ * x = `_y[0]` and y = `_y[1]` its tail (iy = 0 means y is 0). The result goes
+ * to `_k[0]`.
  */
-function kernelSin(x: number, y: number, iy: number): number {
-  // ix < 0x3e400000, i.e. |x| < 2^-27: sin(x) rounds to x. Returns x itself,
+function kernelSin(iy: number): void {
+  const x = _y[0];
+  const y = _y[1];
+  // ix < 0x3e400000, i.e. |x| < 2^-27: sin(x) rounds to x. Yields x itself,
   // so the sign of zero survives.
-  if (Math.abs(x) < 7.450580596923828e-9 /* 2^-27: 0x3E400000, 0x00000000 */) return x;
+  if (Math.abs(x) < 7.450580596923828e-9 /* 2^-27: 0x3E400000, 0x00000000 */) {
+    _k[0] = x;
+    return;
+  }
   const z = x * x;
   const v = z * x;
   const r = S2 + z * (S3 + z * (S4 + z * (S5 + z * S6)));
-  if (iy === 0) return x + v * (S1 + z * r);
-  return x - (z * (0.5 * y - v * r) - y - v * S1);
+  if (iy === 0) _k[0] = x + v * (S1 + z * r);
+  else _k[0] = x - (z * (0.5 * y - v * r) - y - v * S1);
 }
 
-/** fdlibm's `__kernel_cos(x, y)`: cos(x + y) on |x| <= ~pi/4, y the tail. */
-function kernelCos(x: number, y: number): number {
+/**
+ * fdlibm's `__kernel_cos(x, y)`: cos(x + y) on |x| <= ~pi/4, with x = `_y[0]`
+ * and y = `_y[1]` its tail. The result goes to `_k[1]`.
+ */
+function kernelCos(): void {
+  const x = _y[0];
+  const y = _y[1];
   const ix = highWord(x) & 0x7fffffff;
-  if (ix < 0x3e400000) return 1; // |x| < 2^-27
+  if (ix < 0x3e400000) {
+    // |x| < 2^-27
+    _k[1] = 1;
+    return;
+  }
   const z = x * x;
   const r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * C6)))));
   if (ix < 0x3fd33333) {
     // |x| < 0.3
-    return 1 - (0.5 * z - (z * r - x * y));
+    _k[1] = 1 - (0.5 * z - (z * r - x * y));
+    return;
   }
   let qx: number;
   if (ix > 0x3fe90000) {
@@ -229,7 +272,7 @@ function kernelCos(x: number, y: number): number {
   }
   const hz = 0.5 * z - qx;
   const a = 1 - qx;
-  return a - (hz - (z * r - x * y));
+  _k[1] = a - (hz - (z * r - x * y));
 }
 
 // ---- Public API --------------------------------------------------------------------
@@ -243,21 +286,29 @@ function kernelCos(x: number, y: number): number {
  * (development builds warn once).
  */
 export function detSin(x: number): number {
-  const hx = highWord(x);
-  const ix = hx & 0x7fffffff;
-  if (ix <= 0x3fe921fb) return kernelSin(x, 0, 0); // |x| ~<= pi/4
+  const ix = highWord(x) & 0x7fffffff;
   if (ix >= 0x7ff00000) return x - x; // NaN, ±Infinity -> NaN
+  _y[0] = x;
+  _y[1] = 0;
+  if (ix <= 0x3fe921fb) {
+    // |x| ~<= pi/4
+    kernelSin(0);
+    return _k[0];
+  }
   if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
-  const n = remPio2(x, hx, ix);
-  switch (n & 3) {
+  switch (remPio2()) {
     case 0:
-      return kernelSin(_y0, _y1, 1);
+      kernelSin(1);
+      return _k[0];
     case 1:
-      return kernelCos(_y0, _y1);
+      kernelCos();
+      return _k[1];
     case 2:
-      return -kernelSin(_y0, _y1, 1);
+      kernelSin(1);
+      return -_k[0];
     default:
-      return -kernelCos(_y0, _y1);
+      kernelCos();
+      return -_k[1];
   }
 }
 
@@ -270,21 +321,29 @@ export function detSin(x: number): number {
  * (development builds warn once).
  */
 export function detCos(x: number): number {
-  const hx = highWord(x);
-  const ix = hx & 0x7fffffff;
-  if (ix <= 0x3fe921fb) return kernelCos(x, 0); // |x| ~<= pi/4
-  if (ix >= 0x7ff00000) return x - x;
+  const ix = highWord(x) & 0x7fffffff;
+  if (ix >= 0x7ff00000) return x - x; // NaN, ±Infinity -> NaN
+  _y[0] = x;
+  _y[1] = 0;
+  if (ix <= 0x3fe921fb) {
+    // |x| ~<= pi/4
+    kernelCos();
+    return _k[1];
+  }
   if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
-  const n = remPio2(x, hx, ix);
-  switch (n & 3) {
+  switch (remPio2()) {
     case 0:
-      return kernelCos(_y0, _y1);
+      kernelCos();
+      return _k[1];
     case 1:
-      return -kernelSin(_y0, _y1, 1);
+      kernelSin(1);
+      return -_k[0];
     case 2:
-      return -kernelCos(_y0, _y1);
+      kernelCos();
+      return -_k[1];
     default:
-      return kernelSin(_y0, _y1, 1);
+      kernelSin(1);
+      return _k[0];
   }
 }
 
@@ -301,24 +360,27 @@ export function detCos(x: number): number {
  * ```
  */
 export function detSinCos(x: number, out: SinCos): SinCos {
-  const hx = highWord(x);
-  const ix = hx & 0x7fffffff;
-  if (ix <= 0x3fe921fb) {
-    out.s = kernelSin(x, 0, 0);
-    out.c = kernelCos(x, 0);
-    return out;
-  }
+  const ix = highWord(x) & 0x7fffffff;
   if (ix >= 0x7ff00000) {
+    // NaN, ±Infinity -> NaN
     out.s = out.c = x - x;
     return out;
   }
-  if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
-  const n = remPio2(x, hx, ix);
-  const y0 = _y0;
-  const y1 = _y1;
-  const s = kernelSin(y0, y1, 1);
-  const c = kernelCos(y0, y1);
-  switch (n & 3) {
+  _y[0] = x;
+  _y[1] = 0;
+  // |x| ~<= pi/4: the kernels on (x, 0), sin with iy = 0, in quadrant 0.
+  let iy = 0;
+  let quadrant = 0;
+  if (ix > 0x3fe921fb) {
+    if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
+    quadrant = remPio2();
+    iy = 1;
+  }
+  kernelSin(iy);
+  kernelCos();
+  const s = _k[0];
+  const c = _k[1];
+  switch (quadrant) {
     case 0:
       out.s = s;
       out.c = c;

@@ -129,6 +129,9 @@ export const PATTERN_CASES: readonly PatternCase[] = [
   },
 ];
 
+/** The committed value; `patterns.detmath.test.ts` pins it (2355969494). */
+export const PATTERN_GOLDEN = 0x8c6d3dd6;
+
 const FNV_OFFSET = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 

@@ -23,6 +23,7 @@ import type { BulletSpawnData, Modifier } from '../patternTypes';
 import { gen070, mod070 } from './fixtures/patterns070';
 import {
   PATTERN_CASES,
+  PATTERN_GOLDEN,
   patternCaseHashes,
   patternGoldenHash,
   type PatternApi,
@@ -452,6 +453,10 @@ describe('patterns — golden spawn hash (engine-independent)', () => {
   // changed: a breaking change to every recording.
   it('the fixed generator + modifier list hashes to the committed value', () => {
     expect(patternGoldenHash(API)).toBe(GOLDEN);
+  });
+
+  it('the helper exports the same constant (what test:engines compares against)', () => {
+    expect(PATTERN_GOLDEN).toBe(GOLDEN);
   });
 
   it('per case, too (pinpoints which case moved)', () => {

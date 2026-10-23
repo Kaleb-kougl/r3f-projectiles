@@ -6,6 +6,7 @@ import * as Root from '../index';
 import * as Patterns from '../patterns';
 import * as Core from '../core/index';
 import fixtures from './fixtures/sincos.json';
+import { DETSINCOS_GOLDEN, detSinCosGoldenHash } from './helpers/detmathGolden';
 
 // ---------------------------------------------------------------------------
 // Bit helpers
@@ -184,20 +185,12 @@ describe('detmath — detSinCos', () => {
 /**
  * 32-bit FNV-1a over the bytes of `detSinCos(x)` — `s` then `c`, each as its 8
  * IEEE 754 bytes in little-endian order — for 1,000,000 inputs
- * `x = (rng() * 2 - 1) * 1e4` from `createSeededRandom(1337)`.
+ * `x = (rng() * 2 - 1) * 1e4` from `createSeededRandom(1337)`. The loop lives in
+ * `helpers/detmathGolden.ts` (vitest-free) so `npm run test:engines` runs the
+ * same code in Chromium, Firefox and WebKit.
  */
 function goldenHash(): number {
-  const rng = createSeededRandom(1337);
-  const sc: SinCos = { s: 0, c: 0 };
-  const dv = new DataView(new ArrayBuffer(16));
-  let h = 0x811c9dc5;
-  for (let i = 0; i < 1_000_000; i++) {
-    detSinCos((rng() * 2 - 1) * 1e4, sc);
-    dv.setFloat64(0, sc.s, true);
-    dv.setFloat64(8, sc.c, true);
-    for (let b = 0; b < 16; b++) h = Math.imul(h ^ dv.getUint8(b), 0x01000193);
-  }
-  return h >>> 0;
+  return detSinCosGoldenHash({ detSinCos, createSeededRandom });
 }
 
 describe('detmath — golden hash', () => {
@@ -210,6 +203,10 @@ describe('detmath — golden hash', () => {
     // in Chromium, Firefox and WebKit). If it changes, the det math's bits
     // changed: that is a breaking change to every replay.
     expect(goldenHash()).toBe(GOLDEN);
+  });
+
+  it('the helper exports the same constant (what test:engines compares against)', () => {
+    expect(DETSINCOS_GOLDEN).toBe(GOLDEN);
   });
 });
 
