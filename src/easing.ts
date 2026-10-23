@@ -37,10 +37,23 @@ export const EASING: Record<EasingName, EasingFn> = {
   linear: (p) => p,
   easeInQuad: (p) => p * p,
   easeOutQuad: (p) => 1 - (1 - p) * (1 - p),
-  easeInOutQuad: (p) => (p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2),
+  // Integer powers are plain multiplications (0.8.0; was `Math.pow`, which
+  // ECMAScript leaves implementation-approximated): the same bits everywhere.
+  easeInOutQuad: (p) => {
+    if (p < 0.5) return 2 * p * p;
+    const t = -2 * p + 2;
+    return 1 - (t * t) / 2;
+  },
   easeInCubic: (p) => p * p * p,
-  easeOutCubic: (p) => 1 - Math.pow(1 - p, 3),
-  easeInOutCubic: (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2),
+  easeOutCubic: (p) => {
+    const t = 1 - p;
+    return 1 - t * t * t;
+  },
+  easeInOutCubic: (p) => {
+    if (p < 0.5) return 4 * p * p * p;
+    const t = -2 * p + 2;
+    return 1 - (t * t * t) / 2;
+  },
   smoothstep: (p) => p * p * (3 - 2 * p),
 };
 

@@ -153,9 +153,10 @@ export interface BulletSimulationOptions {
  * doubles. Nothing reads a clock, a frame, a renderer or `Math.random`. The
  * inputs must be deterministic too: patterns that call `Math.random`
  * (`gen.galaxy` and `gen.rose3D` without an `rng`, and the `'galaxy'` /
- * `'rose3D'` presets) are not, and `Math.sin` / `Math.cos` (the built-in
- * generators use them) are only reproducible within one JS engine build on
- * one platform. See the README's "Headless simulation".
+ * `'rose3D'` presets) are not, and a custom pattern built on `Math.sin` /
+ * `Math.cos` is only reproducible within one JS engine build on one platform.
+ * The built-in generators and modifiers use `detSin` / `detCos` (0.8.0), which
+ * give the same bits on every engine. See the README's "Headless simulation".
  *
  * ## Slot indices
  * Every per-bullet accessor takes a **slot index** in `[0, capacity)` — the

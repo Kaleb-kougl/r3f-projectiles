@@ -1,5 +1,7 @@
-import { Vector3, Quaternion } from 'three';
+import { Vector3 } from 'three';
 import { acquire } from './pool';
+import { detCos, detSinCos, type SinCos } from './detmath';
+import { normalize3, cross3, quatFromAxisAngle, applyQuat3, type Quat } from './vecmath';
 import type { BulletSpawnData, Modifier } from './patternTypes';
 
 // Payload bitfields ride along on this entry because they are pattern-side
@@ -24,7 +26,15 @@ export type { SinCos } from './detmath';
 const _v1 = new Vector3();
 const _v2 = new Vector3();
 const _v3 = new Vector3();
-const _q1 = new Quaternion();
+const _q1: Quat = { x: 0, y: 0, z: 0, w: 1 };
+const _sc: SinCos = { s: 0, c: 0 };
+
+// Arithmetic (0.8.0): trig is `detSin` / `detCos` / `detSinCos`, and vector
+// math goes through `./vecmath` — never `Math.sin` / `Math.cos` or three's
+// math methods, whose op order is three's to change. Every formula keeps
+// 0.7.0's operation order, so on V8 (whose `Math.sin` / `Math.cos` are the same
+// fdlibm port) the spawn data is bit-identical to 0.7.0's; on every other
+// engine it now matches V8's. `Vector3.set` / `.copy` are plain stores.
 
 // ---------------------------------------------------------------------------
 // Generators
@@ -62,13 +72,16 @@ export const gen = {
       const r = Math.sqrt(1 - y * y);        // radius at y
       const theta = phi * i;
 
-      const x = Math.cos(theta) * r;
-      const z = Math.sin(theta) * r;
+      detSinCos(theta, _sc);
+      const x = _sc.c * r;
+      const z = _sc.s * r;
 
-      _v1.set(x, y, z).normalize();
+      normalize3(_v1.set(x, y, z));
 
       const p = acquire();
-      p.offset.copy(_v1).multiplyScalar(radius);
+      p.offset.x = _v1.x * radius;
+      p.offset.y = _v1.y * radius;
+      p.offset.z = _v1.z * radius;
       p.velocity.copy(_v1);
       spawns.push(p);
     }
@@ -89,16 +102,19 @@ export const gen = {
       const t = (i / count) * Math.PI * 2;
 
       // Parametric Torus Knot
-      const r = Math.cos(q_knot * t) + 2;
-      const x = r * Math.cos(p_knot * t);
-      const y = -Math.sin(q_knot * t);
-      const z = r * Math.sin(p_knot * t);
+      detSinCos(q_knot * t, _sc);
+      const r = _sc.c + 2;
+      const y = -_sc.s;
+      detSinCos(p_knot * t, _sc);
+      const x = r * _sc.c;
+      const z = r * _sc.s;
 
-      const pos = _v1.set(x, y, z).multiplyScalar(radius * 0.5);
+      const k = radius * 0.5;
+      const pos = _v1.set(x * k, y * k, z * k);
 
       const spawned = acquire();
       spawned.offset.copy(pos);
-      spawned.velocity.copy(pos).normalize();
+      normalize3(spawned.velocity.copy(pos));
       spawns.push(spawned);
     }
     return spawns;
@@ -136,13 +152,15 @@ export const gen = {
       const angle = d * spin + armIndex * ((Math.PI * 2) / arms);
       const r = d * radius;
 
-      const x = Math.cos(angle) * r;
-      const z = Math.sin(angle) * r;
+      detSinCos(angle, _sc);
+      const x = _sc.c * r;
+      const z = _sc.s * r;
       const y = (rng() - 0.5) * (radius * 0.2); // Flat disc with some thickness
 
       const p = acquire();
       p.offset.set(x, y, z);
-      p.velocity.set(Math.cos(angle + Math.PI / 2), 0, Math.sin(angle + Math.PI / 2));
+      detSinCos(angle + Math.PI / 2, _sc);
+      p.velocity.set(_sc.c, 0, _sc.s);
       p.life = 8.0;
       spawns.push(p);
     }
@@ -170,13 +188,14 @@ export const gen = {
       const t = i / (count - 1); // 0 to 1
       const angle = t * Math.PI * 2 * turns;
 
-      const x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius;
+      detSinCos(angle, _sc);
+      const x = _sc.c * radius;
+      const z = _sc.s * radius;
       const y = (t - 0.5) * height;
 
       const p = acquire();
       p.offset.set(x, y, z);
-      p.velocity.set(Math.cos(angle), 0, Math.sin(angle));
+      p.velocity.set(_sc.c, 0, _sc.s);
       spawns.push(p);
     }
     return spawns;
@@ -207,16 +226,20 @@ export const gen = {
       const phi = rng() * Math.PI;
 
       // R modulated by cosine of angle × k
-      const r = Math.abs(Math.cos(k * theta)) * radius;
+      const r = Math.abs(detCos(k * theta)) * radius;
 
-      const x = r * Math.sin(phi) * Math.cos(theta);
-      const y = r * Math.cos(phi);
-      const z = r * Math.sin(phi) * Math.sin(theta);
+      detSinCos(phi, _sc);
+      const sinPhi = _sc.s;
+      const cosPhi = _sc.c;
+      detSinCos(theta, _sc);
+      const x = r * sinPhi * _sc.c;
+      const y = r * cosPhi;
+      const z = r * sinPhi * _sc.s;
 
       const pos = _v1.set(x, y, z);
       const p = acquire();
       p.offset.copy(pos);
-      p.velocity.copy(pos).normalize();
+      normalize3(p.velocity.copy(pos));
       spawns.push(p);
     }
     return spawns;
@@ -234,8 +257,11 @@ export const gen = {
     for (let i = 0; i < count; i++) {
       const angle = (i / count) * Math.PI * 2;
       const p = acquire();
-      p.offset.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
-      p.velocity.set(Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(speed);
+      detSinCos(angle, _sc);
+      p.offset.set(_sc.s * radius, 0, _sc.c * radius);
+      // 0.7.0 was `.set(sin, 0, cos).multiplyScalar(speed)`: y stays `0 * speed`
+      // (-0 for a negative speed, NaN for a non-finite one), bit for bit.
+      p.velocity.set(_sc.s * speed, 0 * speed, _sc.c * speed);
       spawns.push(p);
     }
     return spawns;
@@ -282,8 +308,11 @@ export const gen = {
         angle = heading + (i / (count - 1) - 0.5) * spread;
       }
       const p = acquire();
-      p.offset.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
-      p.velocity.set(Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(speed);
+      detSinCos(angle, _sc);
+      p.offset.set(_sc.s * radius, 0, _sc.c * radius);
+      // 0.7.0 was `.set(sin, 0, cos).multiplyScalar(speed)`: y stays `0 * speed`
+      // (-0 for a negative speed, NaN for a non-finite one), bit for bit.
+      p.velocity.set(_sc.s * speed, 0 * speed, _sc.c * speed);
       spawns.push(p);
     }
     return spawns;
@@ -354,14 +383,19 @@ export const mod = {
   accelerate(forward: number, lateral: number = 0): Modifier {
     return (spawns: BulletSpawnData[]) => {
       spawns.forEach((s) => {
-        const dir = _v1.copy(s.velocity).normalize();
-        s.acceleration.addScaledVector(dir, forward);
+        const dir = normalize3(_v1.copy(s.velocity));
+        const acc = s.acceleration;
+        acc.x += dir.x * forward;
+        acc.y += dir.y * forward;
+        acc.z += dir.z * forward;
         if (lateral !== 0) {
           // Compute a lateral direction (perpendicular to velocity and up)
           // Fallback to right if velocity is exactly up/down
           const up = Math.abs(dir.y) > 0.99 ? _v3.set(1, 0, 0) : _v3.set(0, 1, 0);
-          const right = _v2.crossVectors(dir, up).normalize();
-          s.acceleration.addScaledVector(right, lateral);
+          const right = normalize3(cross3(_v2, dir, up));
+          acc.x += right.x * lateral;
+          acc.y += right.y * lateral;
+          acc.z += right.z * lateral;
         }
       });
       return spawns;
@@ -386,16 +420,17 @@ export const mod = {
   /**
    * Rotate every bullet's offset, velocity, and acceleration around an axis.
    *
-   * @param axis  - Rotation axis (will be normalized).
+   * @param axis  - Rotation axis. Normalized **in place** each time the
+   *   modifier runs (as since 0.1), so the caller's vector is mutated.
    * @param angle - Rotation angle in radians.
    */
   rotate(axis: Vector3, angle: number): Modifier {
     return (spawns: BulletSpawnData[]) => {
-      const q = _q1.setFromAxisAngle(axis.normalize(), angle);
+      const q = quatFromAxisAngle(_q1, normalize3(axis), angle);
       spawns.forEach((s) => {
-        s.velocity.applyQuaternion(q);
-        s.acceleration.applyQuaternion(q);
-        s.offset.applyQuaternion(q);
+        applyQuat3(s.velocity, q);
+        applyQuat3(s.acceleration, q);
+        applyQuat3(s.offset, q);
       });
       return spawns;
     };

@@ -23,6 +23,7 @@ import { FRAME_ATTRIBUTE, type BulletFrames } from './render/frames';
 import type { BulletOrient, InstanceWriter } from './render/orient';
 import type { BulletOutline } from './render/outline';
 import { resolveEasing } from './easing';
+import { detSinCos, type SinCos } from './detmath';
 import { DEV } from './dev';
 import {
   SimulationCore,
@@ -52,6 +53,13 @@ const REDUCED_MOTION_MAX = 200;
 
 /** Floats per instance matrix — the stride `instanceMatrix` update ranges use. */
 const MATRIX_STRIDE = 16;
+
+/**
+ * Scratch for the built-in orbit's `detSinCos` (0.8.0; was `Math.cos` /
+ * `Math.sin`, bit-identical on V8). Written and read within one statement
+ * pair, so one module-scope object serves every field.
+ */
+const _orbitSC: SinCos = { s: 0, c: 0 };
 
 // ---------------------------------------------------------------------------
 // GPU helpers
@@ -1553,12 +1561,8 @@ export const BulletField = forwardRef<BulletFieldHandle, BulletFieldProps>(
             _sourcePos.copy(originVec);
           } else {
             entry.sourceRotation += ep.rotationSpeed * fireInterval;
-            const rot = entry.sourceRotation;
-            _sourcePos.set(
-              Math.cos(rot) * 2,
-              ep.spawnCenterY,
-              Math.sin(rot) * 2,
-            );
+            detSinCos(entry.sourceRotation, _orbitSC);
+            _sourcePos.set(_orbitSC.c * 2, ep.spawnCenterY, _orbitSC.s * 2);
           }
 
           const spawned = core._burst(_sourcePos, ep.pattern, entry.id, false);
