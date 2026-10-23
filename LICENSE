@@ -672,3 +672,21 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+-------------------------------------------------------------------------------
+
+THIRD-PARTY NOTICES
+
+src/detmath.ts (shipped in dist/ as the `/detmath` entry and bundled into the
+other entries) is a port of fdlibm 5.3, the Freely Distributable LIBM
+(netlib.org/fdlibm): e_rem_pio2.c, k_sin.c, k_cos.c, s_sin.c and s_cos.c.
+Its notice is reproduced here as it requires:
+
+  ====================================================
+  Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+  Developed at SunSoft, a Sun Microsystems, Inc. business.
+  Permission to use, copy, modify, and distribute this
+  software is freely granted, provided that this notice
+  is preserved.
+  ====================================================
