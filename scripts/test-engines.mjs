@@ -8,8 +8,10 @@
 // `npm run build` first): it serves `dist/` plus a blank page over node:http,
 // opens the page in each Playwright engine, and recomputes there
 //
-//   1. the 1,000,000-input detSinCos FNV hash (dist/detmath.js), and
-//   2. the PATTERN_CASES golden spawn hash (dist/patterns.js),
+//   1. the 1,000,000-input detSinCos FNV hash (dist/detmath.js),
+//   2. the detSinCos hash over inputs beyond DETMATH_RANGE (the `%` 2π
+//      reduction path, 2^20 up to ±MAX_VALUE), and
+//   3. the PATTERN_CASES golden spawn hash (dist/patterns.js),
 //
 // with the same helper code the vitest suite pins them with
 // (src/__tests__/helpers/{detmathGolden,patternGolden}.ts, transpiled here with
@@ -89,6 +91,7 @@ const PAGE = `<!doctype html>
     const t1 = performance.now();
     window.__engineResult = {
       detSinCos,
+      beyond: dg.detSinCosBeyondGoldenHash({ detSinCos: det.detSinCos, createSeededRandom: pat.createSeededRandom }),
       pattern: pg.patternGoldenHash(api),
       cases: pg.patternCaseHashes(api),
       detSinCosMs: t1 - t0,
@@ -136,6 +139,17 @@ async function importHelper(name) {
   return import(`data:text/javascript;base64,${Buffer.from(HELPER_JS[name]).toString('base64')}`);
 }
 
+/** Run `fn` with console.warn muted (the beyond-range inputs trigger detmath's dev warning). */
+function quietly(fn) {
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    return fn();
+  } finally {
+    console.warn = warn;
+  }
+}
+
 async function nodeResult() {
   const det = await import(pathToFileURL(path.join(DIST, 'detmath.js')).href);
   const pat = await import(pathToFileURL(path.join(DIST, 'patterns.js')).href);
@@ -149,9 +163,12 @@ async function nodeResult() {
   };
   return {
     detSinCos: dg.detSinCosGoldenHash({ detSinCos: det.detSinCos, createSeededRandom: pat.createSeededRandom }),
+    beyond: quietly(() =>
+      dg.detSinCosBeyondGoldenHash({ detSinCos: det.detSinCos, createSeededRandom: pat.createSeededRandom }),
+    ),
     pattern: pg.patternGoldenHash(api),
     cases: pg.patternCaseHashes(api),
-    expected: { detSinCos: dg.DETSINCOS_GOLDEN, pattern: pg.PATTERN_GOLDEN },
+    expected: { detSinCos: dg.DETSINCOS_GOLDEN, beyond: dg.DETSINCOS_BEYOND_GOLDEN, pattern: pg.PATTERN_GOLDEN },
   };
 }
 
@@ -181,7 +198,7 @@ async function runEngine(type, origin, node) {
     const r = await page.evaluate(() => window.__engineResult);
     if (r.error) return { status: 'FAILED', reason: r.error, version: browser.version() };
     const problems = [];
-    for (const key of ['detSinCos', 'pattern']) {
+    for (const key of ['detSinCos', 'beyond', 'pattern']) {
       if (r[key] !== node.expected[key]) problems.push(`${key} ${hex(r[key])} != committed ${hex(node.expected[key])}`);
       if (r[key] !== node[key]) problems.push(`${key} ${hex(r[key])} != Node ${hex(node[key])}`);
     }
@@ -202,10 +219,12 @@ async function runEngine(type, origin, node) {
 
 const node = await nodeResult();
 console.log(`Node ${process.version} (V8 ${process.versions.v8})`);
-console.log(`  detSinCos ${hex(node.detSinCos)}  pattern ${hex(node.pattern)}`);
-console.log(`  committed ${hex(node.expected.detSinCos)}            ${hex(node.expected.pattern)}`);
+console.log(`  detSinCos ${hex(node.detSinCos)}  beyond ${hex(node.beyond)}  pattern ${hex(node.pattern)}`);
+console.log(
+  `  committed ${hex(node.expected.detSinCos)}         ${hex(node.expected.beyond)}          ${hex(node.expected.pattern)}`,
+);
 let failed = 0;
-if (node.detSinCos !== node.expected.detSinCos || node.pattern !== node.expected.pattern) {
+if (['detSinCos', 'beyond', 'pattern'].some((k) => node[k] !== node.expected[k])) {
   console.log('  FAILED: Node does not reproduce the committed goldens from dist/ (stale build?)');
   failed++;
 }
@@ -226,7 +245,7 @@ try {
     if (out.result) {
       const r = out.result;
       console.log(
-        `${out.status.padEnd(7)} ${name}${ver}: detSinCos ${hex(r.detSinCos)}  pattern ${hex(r.pattern)}` +
+        `${out.status.padEnd(7)} ${name}${ver}: detSinCos ${hex(r.detSinCos)}  beyond ${hex(r.beyond)}  pattern ${hex(r.pattern)}` +
           `  (1e6 detSinCos in ${r.detSinCosMs.toFixed(0)} ms)`,
       );
     } else {

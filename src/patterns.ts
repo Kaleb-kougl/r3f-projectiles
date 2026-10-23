@@ -32,9 +32,12 @@ const _sc: SinCos = { s: 0, c: 0 };
 // Arithmetic (0.8.0): trig is `detSin` / `detCos` / `detSinCos`, and vector
 // math goes through `./vecmath` — never `Math.sin` / `Math.cos` or three's
 // math methods, whose op order is three's to change. Every formula keeps
-// 0.7.0's operation order, so on V8 (whose `Math.sin` / `Math.cos` are the same
-// fdlibm port) the spawn data is bit-identical to 0.7.0's; on every other
-// engine it now matches V8's. `Vector3.set` / `.copy` are plain stores.
+// 0.7.0's operation order, so in Node (whose `Math.sin` / `Math.cos` are an
+// fdlibm port that agrees with det math bit for bit) the spawn data is
+// bit-identical to 0.7.0's. In browsers and Electron (Chromium's libm path
+// differs from Node's), Firefox and Safari, 0.7.0's `Math.sin` was the
+// engine's own, so some bullets differ from 0.7.0 in the last bit; they now
+// equal Node's everywhere. `Vector3.set` / `.copy` are plain stores.
 
 // ---------------------------------------------------------------------------
 // Generators

@@ -6,7 +6,13 @@ import * as Root from '../index';
 import * as Patterns from '../patterns';
 import * as Core from '../core/index';
 import fixtures from './fixtures/sincos.json';
-import { DETSINCOS_GOLDEN, detSinCosGoldenHash } from './helpers/detmathGolden';
+import {
+  DETSINCOS_BEYOND_GOLDEN,
+  DETSINCOS_GOLDEN,
+  beyondRangeInputs,
+  detSinCosBeyondGoldenHash,
+  detSinCosGoldenHash,
+} from './helpers/detmathGolden';
 
 // ---------------------------------------------------------------------------
 // Bit helpers
@@ -197,8 +203,9 @@ describe('detmath — golden hash', () => {
   it('1,000,000 seeded detSinCos results hash to the committed value', () => {
     // Produced once by running goldenHash() under Node 22.22 (V8) on the first
     // implementation (0.8.0 L1), after the 1-ulp fixture test passed; at that
-    // point detSin / detCos also matched V8's own Math.sin / Math.cos (itself
-    // an fdlibm port) bit for bit on every fixture and on 1e6 random inputs.
+    // point detSin / detCos also matched Node's own Math.sin / Math.cos (an
+    // fdlibm port in Node's V8 build; Chromium's differs) bit for bit on every
+    // fixture and on 1e6 random inputs.
     // It must be the same on every engine (L4's cross-engine run recomputes it
     // in Chromium, Firefox and WebKit). If it changes, the det math's bits
     // changed: that is a breaking change to every replay.
@@ -212,6 +219,9 @@ describe('detmath — golden hash', () => {
 
 /** See the test above: 0x7b8d985b. */
 const GOLDEN = 2072877147;
+
+/** detSinCos over `beyondRangeInputs()`: 0xeb1d515f. */
+const BEYOND_GOLDEN = 3944567135;
 
 // ---------------------------------------------------------------------------
 // (e) Beyond the range: deterministic, warned once in development
@@ -257,11 +267,78 @@ describe('detmath — beyond DETMATH_RANGE', () => {
     }
   });
 
-  it('just past the range is still close to Math.sin (graceful, not a cliff)', () => {
+  it('just past the range is still close to Math.sin (error about |x| · 3.9e-17, not a cliff)', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     for (const x of [DETMATH_RANGE + 1, 1e6, -2e6]) {
       expect(Math.abs(detSin(x) - Math.sin(x))).toBeLessThan(1e-9);
       expect(Math.abs(detCos(x) - Math.cos(x))).toBeLessThan(1e-9);
     }
+  });
+
+  // Every finite input beyond the range is reduced as `x % (2 * Math.PI)`
+  // (exact in ECMAScript) before the in-range path runs.
+  const TWO_PI_DOUBLE = 2 * Math.PI;
+  const SWEEP: number[] = [
+    ...BEYOND,
+    2 ** 53,
+    -(2 ** 53),
+    2 ** 54,
+    2 ** 60,
+    -(2 ** 60),
+    1e100,
+    -1e100,
+    1e300,
+    -1e300,
+    Number.MAX_VALUE,
+    -Number.MAX_VALUE,
+    ...beyondRangeInputs(createSeededRandom),
+  ];
+
+  it('the sweep covers every binade past the range, up to ±MAX_VALUE', () => {
+    expect(toHex(BEYOND[0])).toBe('412921fb54442d19');
+    expect(beyondRangeInputs(createSeededRandom)[0]).toBe(BEYOND[0]);
+    expect(SWEEP.length).toBeGreaterThan(10_000);
+    for (const x of SWEEP) {
+      expect(Number.isFinite(x)).toBe(true);
+      expect(Math.abs(x)).toBeGreaterThan(DETMATH_RANGE);
+    }
+    const exps = new Set(SWEEP.map((x) => parseInt(toHex(Math.abs(x)).slice(0, 3), 16)));
+    for (let e = 1043; e <= 2046; e++) expect(exps.has(e), `biased exponent ${e}`).toBe(true);
+  });
+
+  it('is finite and in [-1, 1] for every finite input, with sin² + cos² within 1e-15 of 1', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sc: SinCos = { s: 0, c: 0 };
+    for (const x of SWEEP) {
+      const s = detSin(x);
+      const c = detCos(x);
+      detSinCos(x, sc);
+      for (const v of [s, c, sc.s, sc.c]) {
+        if (!(Number.isFinite(v) && Math.abs(v) <= 1)) throw new Error(`x = ${x}: ${v} out of [-1, 1]`);
+      }
+      expect(Math.abs(s * s + c * c - 1), `x = ${x}`).toBeLessThanOrEqual(1e-15);
+      expect(Object.is(sc.s, s) && Object.is(sc.c, c), `detSinCos(${x})`).toBe(true);
+    }
+  });
+
+  it('equals detSin / detCos of x % (2 * Math.PI) bit for bit', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(toHex(TWO_PI_DOUBLE)).toBe('401921fb54442d18');
+    for (const x of SWEEP) {
+      const r = x % TWO_PI_DOUBLE;
+      expect(Math.abs(r)).toBeLessThan(TWO_PI_DOUBLE);
+      if (!Object.is(detSin(x), detSin(r)) || !Object.is(detCos(x), detCos(r))) {
+        throw new Error(`x = ${x} [${toHex(x)}]: detSin ${detSin(x)} vs ${detSin(r)}, detCos ${detCos(x)} vs ${detCos(r)}`);
+      }
+    }
+  });
+
+  it(`the beyond-range golden: ${beyondRangeInputs(createSeededRandom).length} inputs hash to the committed value`, () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Produced under Node 22.22 when the `%` reduction went in (0.8.0 review
+    // fix); `test:engines` recomputes it in Chromium, Firefox and WebKit.
+    expect(detSinCosBeyondGoldenHash({ detSinCos, createSeededRandom })).toBe(BEYOND_GOLDEN);
+    expect(DETSINCOS_BEYOND_GOLDEN).toBe(BEYOND_GOLDEN);
   });
 
   it('warns once in development, and not for in-range inputs', async () => {
@@ -324,8 +401,8 @@ describe('detmath — source', () => {
     const src = await source();
     const re = /=\s*(-?[0-9.]+(?:e-?[0-9]+)?)\s*;\s*\/\/\s*0x([0-9A-F]{8}),\s*0x([0-9A-F]{8})/g;
     const found = [...src.matchAll(re)];
-    // DETMATH_RANGE, invpio2, six pio2 parts, S1..S6, C1..C6
-    expect(found.length).toBe(20);
+    // DETMATH_RANGE, TWO_PI_DOUBLE, invpio2, six pio2 parts, S1..S6, C1..C6
+    expect(found.length).toBe(21);
     for (const [, literal, hi, lo] of found) {
       expect(toHex(Number(literal)), literal).toBe((hi + lo).toLowerCase());
     }
@@ -341,5 +418,13 @@ describe('detmath — source', () => {
       /Math\.(sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|expm1|log|log1p|log2|log10|pow|hypot|cbrt|random)\b/,
     );
     expect(code).not.toMatch(/\*\*/);
+    // NaN out is the `NaN` literal, never an arithmetic NaN such as `x - x`
+    // (whose sign / payload bits are engine- and CPU-dependent).
+    expect(code).not.toMatch(/\b(\w+)\s*-\s*\1\b/);
+  });
+
+  it('keeps the fdlibm notice as a legal comment (`/*!`), so the build keeps it', async () => {
+    const src = await source();
+    expect(src).toMatch(/\/\*![\s\S]*Copyright \(C\) 1993 by Sun Microsystems, Inc\.[\s\S]*?\*\//);
   });
 });

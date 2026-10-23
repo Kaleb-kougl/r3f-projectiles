@@ -16,6 +16,10 @@ import { build, type Options } from 'tsup';
  * Comments are stripped before scanning: the shipped JSDoc mentions
  * `Math.atan2` (how to recover a heading), which is documentation, not a call.
  *
+ * It also checks the fdlibm notice ships: src/detmath.ts keeps it as a legal
+ * comment (`/*!`), which esbuild moves to the end of the output file (here,
+ * the shared chunk) holding detSin, where an ordinary comment is stripped.
+ *
  * Like `core.entry.test.ts`, building into a scratch directory rather than
  * reading `dist/` keeps the test independent of whether (and from what)
  * `npm run build` last ran.
@@ -124,6 +128,26 @@ const BANNED: readonly string[] = [
   'applyAxisAngle',
   'setFromEuler',
   'applyEuler',
+  // three's other trig-backed methods the lint restricts (the distinctive
+  // names; `angle(` alone would match too much).
+  'angleTo(',
+  'rotateAround(',
+  'makeRotationX(',
+  'makeRotationY(',
+  'makeRotationZ(',
+  'makeRotationAxis(',
+  'makeRotationFromEuler(',
+  'setFromSphericalCoords(',
+  'setFromCylindricalCoords(',
+  'setFromSpherical(',
+  'setFromCylindrical(',
+  'setFromCartesianCoords(',
+  'slerp(',
+  'slerpQuaternions(',
+  'rotateTowards(',
+  'new Spherical(',
+  'new Cylindrical(',
+  'globalThis.Math',
 ];
 
 /** Banned names found in `files` (comment-stripped), as `file: name`. */
@@ -151,6 +175,17 @@ describe('det-math as built — no engine trig in the det entries', () => {
       const { files, bare } = closure(entry);
       expect([...bare]).toEqual([]);
       for (const f of files.slice(1)) expect(path.dirname(f)).toBe(OUT);
+    });
+  }
+
+  for (const entry of ['detmath.js', 'detmath.cjs', 'patterns.js', 'core.js', 'index.js', 'index.cjs']) {
+    it(`${entry}: the built file holding detSin carries the fdlibm notice`, () => {
+      const { files } = closure(entry);
+      const holders = files.filter((f) => /\bfunction detSin\s*\(/.test(code(fs.readFileSync(f, 'utf8'))));
+      expect(holders.length).toBe(1);
+      const text = fs.readFileSync(holders[0], 'utf8');
+      expect(text).toContain('Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.');
+      expect(text).toContain('Permission to use, copy, modify, and distribute this');
     });
   }
 

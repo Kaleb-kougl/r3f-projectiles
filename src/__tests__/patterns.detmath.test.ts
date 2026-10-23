@@ -2,14 +2,17 @@
 //
 // 0.8.0 L2: the generators and modifiers on det math.
 //
-// (a) 0.7.0 equivalence — a "V8 property". 0.8.0 replaced `Math.sin` /
-//     `Math.cos` with `detSin` / `detCos` and three's vector math with
-//     `src/vecmath.ts`, keeping every formula's operation order. V8's own
-//     `Math.sin` / `Math.cos` are the same fdlibm port, so on V8 (Node, Chrome,
-//     Electron) with the installed three every bit of the spawn data must equal
-//     0.7.0's, which a verbatim copy in `fixtures/patterns070.ts` reproduces. On
-//     any other engine 0.7.0's `Math.sin` is that engine's own, so only
-//     closeness (2 ulp) is asserted there.
+// (a) 0.7.0 equivalence. 0.8.0 replaced `Math.sin` / `Math.cos` with
+//     `detSin` / `detCos` and three's vector math with `src/vecmath.ts`,
+//     keeping every formula's operation order. So wherever the engine's own
+//     `Math.sin` / `Math.cos` are an fdlibm port that agrees with det math bit
+//     for bit, every bit of the spawn data (with the installed three) must
+//     equal 0.7.0's, which a verbatim copy in `fixtures/patterns070.ts`
+//     reproduces. That is Node's V8 build — not "V8" in general: Chromium
+//     (Chrome, Electron) uses a different libm path and its `Math.sin` differs
+//     from `detSin` in the last bit on a few percent of inputs. So the gate is
+//     a probe, `MATH_IS_FDLIBM` (below), not the engine's name: when it holds,
+//     bit identity is asserted; otherwise only closeness (2 ulp).
 // (b) The cross-engine golden: one hash over the spawn data of
 //     `helpers/patternGolden.ts`' fixed list. Engine-independent by
 //     construction; L4 recomputes it in browsers.
@@ -18,6 +21,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
 import { gen, mod, compose, createSeededRandom } from '../patterns';
+import { detSin, detCos } from '../detmath';
+import sincos from './fixtures/sincos.json';
 import { releaseSpawnData } from '../pool';
 import type { BulletSpawnData, Modifier } from '../patternTypes';
 import { gen070, mod070 } from './fixtures/patterns070';
@@ -29,12 +34,29 @@ import {
   type PatternApi,
 } from './helpers/patternGolden';
 
-// `process.versions.v8`, read through globalThis (no Node types in the tests).
-const ON_V8 =
-  typeof (globalThis as { process?: { versions?: { v8?: unknown } } }).process?.versions?.v8 ===
-  'string';
-
 const TAU = Math.PI * 2;
+
+/**
+ * Whether this engine's `Math.sin` / `Math.cos` equal `detSin` / `detCos` bit
+ * for bit — over every fixture input (`fixtures/sincos.json`) and 5,000
+ * seeded random ones (angles in ±2π, and in ±1e3 as the pattern sweeps use).
+ * True on Node (whose V8 build's trig is an fdlibm port); false in Chromium
+ * (measured: ~3% of random inputs differ), and not expected in Firefox or
+ * Safari, which have their own libms. Only when it holds can 0.8.0's spawn data be expected
+ * to equal 0.7.0's (which called `Math.sin`) bit for bit.
+ */
+const MATH_IS_FDLIBM: boolean = (() => {
+  const dv = new DataView(new ArrayBuffer(8));
+  const fromHex = (h: string): number => {
+    dv.setBigUint64(0, BigInt('0x' + h));
+    return dv.getFloat64(0);
+  };
+  const xs = (sincos as { entries: { x: string }[] }).entries.map((e) => fromHex(e.x));
+  const rng = createSeededRandom(2024);
+  for (let i = 0; i < 2000; i++) xs.push((rng() * 2 - 1) * TAU);
+  for (let i = 0; i < 3000; i++) xs.push((rng() * 2 - 1) * 1e3);
+  return xs.every((x) => Object.is(Math.sin(x), detSin(x)) && Object.is(Math.cos(x), detCos(x)));
+})();
 
 // ---------------------------------------------------------------------------
 // Bit helpers
@@ -93,9 +115,9 @@ interface Tally {
 const newTally = (): Tally => ({ bad: [], batches: 0, values: 0 });
 
 /**
- * Compare a 0.8.0 batch with 0.7.0's, every field of every bullet. On V8: the
- * same bits (`Object.is`, so `-0` vs `0` is a mismatch and NaN matches NaN).
- * Elsewhere: within 2 ulp, or — where a component is the small difference of
+ * Compare a 0.8.0 batch with 0.7.0's, every field of every bullet. When
+ * {@link MATH_IS_FDLIBM}: the same bits (`Object.is`, so `-0` vs `0` is a
+ * mismatch and NaN matches NaN). Elsewhere: within 2 ulp, or — where a component is the small difference of
  * larger terms (a cross product, a rotation) and its own ulp is meaningless —
  * within 2 ulp of the batch's largest magnitude.
  */
@@ -106,7 +128,7 @@ function compareBatch(t: Tally, label: string, now: BulletSpawnData[], was: Bull
     return;
   }
   let scale = 0;
-  if (!ON_V8) {
+  if (!MATH_IS_FDLIBM) {
     for (const s of was) {
       for (const [, get] of FIELDS) {
         const v = get(s);
@@ -120,7 +142,7 @@ function compareBatch(t: Tally, label: string, now: BulletSpawnData[], was: Bull
       const b = get(was[i]);
       t.values++;
       let ok: boolean;
-      if (ON_V8 || a === null || b === null) ok = Object.is(a, b);
+      if (MATH_IS_FDLIBM || a === null || b === null) ok = Object.is(a, b);
       else ok = ulpDistance(a, b) <= 2 || Math.abs(a - b) <= 2 * Number.EPSILON * scale;
       if (!ok && t.bad.length < 20) {
         t.bad.push(
@@ -155,7 +177,7 @@ const COUNTS = range(1, 64);
 // (a) 0.7.0 equivalence
 // ---------------------------------------------------------------------------
 
-describe(`patterns — 0.7.0 equivalence (V8 property: ${ON_V8 ? 'bit-identical' : '≤ 2 ulp'} here)`, () => {
+describe(`patterns — 0.7.0 equivalence (${MATH_IS_FDLIBM ? 'Math.sin is fdlibm here: bit-identical' : 'Math.sin is not fdlibm here: ≤ 2 ulp'})`, () => {
   it('gen.arc: counts 1..64 × spreads (incl. ≥ 2π) × headings (incl. negative, > 2π) × speed / radius', () => {
     const t = newTally();
     const spreads = [0, 0.1, Math.PI / 4, 1.2, Math.PI / 2, Math.PI, 3, TAU - 1e-8, TAU - 1e-9, TAU, 7, 100];
@@ -363,7 +385,7 @@ describe(`patterns — 0.7.0 equivalence (V8 property: ${ON_V8 ? 'bit-identical'
             () => compose(base(base070), mod070.accelerate(1, 0.5), rotWas, rotWas),
           );
           for (const c of ['x', 'y', 'z'] as const) {
-            if (!(ON_V8 ? Object.is(axisNow[c], axisWas[c]) : ulpDistance(axisNow[c], axisWas[c]) <= 2)) {
+            if (!(MATH_IS_FDLIBM ? Object.is(axisNow[c], axisWas[c]) : ulpDistance(axisNow[c], axisWas[c]) <= 2)) {
               t.bad.push(`axis (${x}, ${y}, ${z}).${c}: ${axisNow[c]} vs ${axisWas[c]}`);
             }
           }
@@ -419,7 +441,7 @@ describe(`patterns — 0.7.0 equivalence (V8 property: ${ON_V8 ? 'bit-identical'
     expectClean(t, 9 * 5);
   });
 
-  it('the golden list (b) itself: 0.7.0 gives the same hash on V8', () => {
+  it('the golden list (b) itself: 0.7.0 gives the same hash where Math.sin is fdlibm', () => {
     const api070: PatternApi = {
       gen: gen070 as unknown as typeof gen,
       mod: mod070 as unknown as typeof mod,
@@ -428,7 +450,7 @@ describe(`patterns — 0.7.0 equivalence (V8 property: ${ON_V8 ? 'bit-identical'
       vec3: (x, y, z) => new Vector3(x, y, z),
     };
     const was = patternGoldenHash(api070);
-    if (ON_V8) expect(patternGoldenHash(API)).toBe(was);
+    if (MATH_IS_FDLIBM) expect(patternGoldenHash(API)).toBe(was);
     else expect(typeof was).toBe('number'); // engine-specific Math.sin: no equality to assert
   });
 });
@@ -447,7 +469,8 @@ const API: PatternApi = {
 
 describe('patterns — golden spawn hash (engine-independent)', () => {
   // Produced once under Node 22 (V8) on 0.8.0 L2, after the 0.7.0 equivalence
-  // above held bit for bit — so it is also 0.7.0's hash on V8. Every engine
+  // above held bit for bit — so it is also 0.7.0's hash on Node (not in a
+  // browser or Electron, whose Math.sin is not Node's). Every engine
   // must reproduce it (L4's `test:engines` recomputes it in Chromium, Firefox
   // and WebKit from the built bundle). If it changes, some pattern's bits
   // changed: a breaking change to every recording.

@@ -458,7 +458,104 @@ describe('writeStateHash / hashState', () => {
     expect(createBulletSimulation().hashState()).toBe(createBulletSimulation().hashState());
     expect(Number.isInteger(make(1)) && make(1) >= 0 && make(1) < 2 ** 32).toBe(true);
   });
+
+  // A NaN's bits are not portable: `Infinity - Infinity` is fff8… on V8 x86
+  // and 7ff8… in JavaScriptCore, and a DataView / typed-array store may pick
+  // any NaN encoding. hashState folds every NaN as the canonical
+  // 0x7FF8000000000000, so a state holding one hashes the same everywhere.
+  describe('NaN canonicalization', () => {
+    const dv = new DataView(new ArrayBuffer(8));
+    /** A NaN with the given 64 raw bits, read back through a DataView. */
+    const crafted = (bits: bigint): number => {
+      dv.setBigUint64(0, bits);
+      return dv.getFloat64(0);
+    };
+    const zero = 0;
+    const NANS: [string, number][] = [
+      ['NaN', NaN],
+      ['0 / 0', zero / zero],
+      ['Infinity - Infinity', Infinity - Infinity],
+      ['Math.sqrt(-1)', Math.sqrt(-1)],
+      ['crafted 0x7ff8000000000000', crafted(0x7ff8000000000000n)],
+      ['crafted 0xfff8000000000000 (sign bit)', crafted(0xfff8000000000000n)],
+      ['crafted 0x7ff0000000000001 (signalling payload)', crafted(0x7ff0000000000001n)],
+      ['crafted 0xfff7dead0000beef (sign + payload)', crafted(0xfff7dead0000beefn)],
+      ['crafted 0x7fffffffffffffff (all payload bits)', crafted(0x7fffffffffffffffn)],
+    ];
+
+    /**
+     * The documented hash with a canonical NaN, written out independently: FNV
+     * over each double's two little-endian words, the count first.
+     */
+    function reference(values: number[], count: number): number {
+      const view = new DataView(new ArrayBuffer(8));
+      let h = 0x811c9dc5;
+      for (const v of [count, ...values]) {
+        if (Number.isNaN(v)) view.setBigUint64(0, 0x7ff8000000000000n, true);
+        else view.setFloat64(0, v, true);
+        h = Math.imul(h ^ view.getUint32(0, true), 0x01000193);
+        h = Math.imul(h ^ view.getUint32(4, true), 0x01000193);
+      }
+      return h >>> 0;
+    }
+
+    it('the injected NaNs really are NaNs (and some carry non-canonical bits)', () => {
+      for (const [, v] of NANS) expect(Number.isNaN(v)).toBe(true);
+      dv.setFloat64(0, NANS[5][1]);
+      // What the engine kept is its business; at least one pattern differs from canonical.
+      const kept = NANS.map(([, v]) => (dv.setFloat64(0, v), dv.getBigUint64(0)));
+      expect(new Set(kept).size).toBeGreaterThan(1);
+    });
+
+    it('a NaN position hashes to a fixed value, however the NaN was made', () => {
+      const hashes = NANS.map(([name, nan]) => {
+        const sim = createBulletSimulation();
+        sim.fireAt({ x: nan, y: 1, z: 2 }, burst([{ velocity: [3, 4, 5], life: 6, payload: 7 }]), 8);
+        const out: number[] = [];
+        sim.writeStateHash(out);
+        expect(Number.isNaN(out[1]), name).toBe(true);
+        return sim.hashState();
+      });
+      for (const h of hashes) expect(h).toBe(NAN_POSITION_HASH);
+      expect(reference([0, NaN, 1, 2, 3, 4, 5, 6, 7, 8], 1)).toBe(NAN_POSITION_HASH);
+    });
+
+    it('a NaN payload (setPayload) hashes the same for every NaN, and unlike any number', () => {
+      const hash = (payload: number): number => {
+        const sim = createBulletSimulation();
+        sim.fireAt(ZERO, burst([{}]));
+        sim.setPayload(0, payload);
+        return sim.hashState();
+      };
+      const first = hash(NANS[0][1]);
+      for (const [name, nan] of NANS) expect(hash(nan), name).toBe(first);
+      expect(first).toBe(reference([0, 0, 0, 0, 0, 0, 0, 1000, NaN, 0], 1));
+      expect(first).not.toBe(hash(0));
+      expect(first).not.toBe(hash(Infinity));
+    });
+
+    it('non-NaN states hash by their exact bits, as before', () => {
+      const sim = createBulletSimulation();
+      // y: -0 + an offset of -0 stays -0.
+      sim.fireAt(
+        { x: 1.5, y: -0, z: 1e-300 },
+        burst([{ offset: [0, -0, 0], velocity: [Infinity, -Infinity, -0], life: 3, payload: -4 }]),
+        5,
+      );
+      const out: number[] = [];
+      sim.writeStateHash(out);
+      expect(Object.is(out[2], -0) && Object.is(out[6], -0)).toBe(true);
+      expect(out).toEqual([0, 1.5, -0, 1e-300, Infinity, -Infinity, -0, 3, -4, 5]);
+      expect(sim.hashState()).toBe(reference(out, 1));
+      expect(sim.hashState()).toBe(NON_NAN_HASH);
+    });
+  });
 });
+
+/** `hashState` of the NaN-position state above, on every engine. */
+const NAN_POSITION_HASH = 4162726109; // 0xf81e28dd
+/** `hashState` of the non-NaN state above (unchanged from 0.7.0's hashing). */
+const NON_NAN_HASH = 2673421217; // 0x9f592ba1
 
 // ===========================================================================
 // 7. Seeded generators

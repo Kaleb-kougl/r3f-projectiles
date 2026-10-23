@@ -1,18 +1,26 @@
 // ---------------------------------------------------------------------------
 // Deterministic sin / cos — bit-identical on every JavaScript engine
 // ---------------------------------------------------------------------------
-//
-// Ported from fdlibm 5.3 (the Freely Distributable LIBM, netlib.org/fdlibm),
-// whose notice follows and must be preserved:
-//
-//   ====================================================
-//   Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
-//
-//   Developed at SunSoft, a Sun Microsystems, Inc. business.
-//   Permission to use, copy, modify, and distribute this
-//   software is freely granted, provided that this notice
-//   is preserved.
-//   ====================================================
+
+/*!
+ * r3f-projectiles detmath (detSin / detCos / detSinCos) is ported from
+ * fdlibm 5.3 (the Freely Distributable LIBM, netlib.org/fdlibm), whose
+ * notice follows and must be preserved:
+ *
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+// The notice above is a legal comment (`/*!`): esbuild, and so tsup, keeps it
+// in the built output (at the end of the file or chunk that holds this code)
+// where an ordinary comment would be stripped. `bundle.detmath.test.ts`
+// checks that the built file containing detSin carries it.
 //
 // What was ported, operation for operation:
 //
@@ -21,14 +29,20 @@
 //   pio2_2 / pio2_2t, pio2_3 / pio2_3t), `n = floor(|x| * invpio2 + 0.5)`, and
 //   the second and third refinement rounds taken when the exponent check sees
 //   cancellation. As in fdlibm 5.3 the reduction runs on |x| and a negative x
-//   negates the remainder and the quadrant. Two departures, neither of which
-//   adds an operation to a result: the `|x| < 3pi/4` shortcut is not ported
-//   (the medium path with n = 1 covers it, as FreeBSD msun's
-//   `goto medium` does near pi/2), and the `npio2_hw` quick check that skips
-//   the exponent check for n < 32 is not ported — the exponent check always
-//   runs, as in FreeBSD msun, so refinement is taken whenever it is needed.
+//   negates the remainder and the quadrant. Two departures from fdlibm 5.3:
+//   the `|x| < 3pi/4` shortcut is not ported (the medium path with n = 1
+//   covers it, as FreeBSD msun's `goto medium` does near pi/2), and the
+//   `npio2_hw` quick check that skips the exponent check for n < 32 is not
+//   ported — the exponent check always runs, as in FreeBSD msun. Both
+//   shortcuts skip the exponent check, so where it sees cancellation this
+//   port takes a refinement round that fdlibm 5.3 would not, and its
+//   remainder is then at least as accurate. That could in principle move a
+//   last bit; on every input class tested (the 4,705 fixtures and a million
+//   random inputs) the bits still match an fdlibm-based `Math.sin` /
+//   `Math.cos` (Node's).
 //   The Payne–Hanek path for huge |x| (`__kernel_rem_pio2`) is not ported:
-//   beyond `DETMATH_RANGE` the medium path still runs (see below).
+//   beyond `DETMATH_RANGE` x is first reduced exactly modulo the double
+//   nearest 2·pi (see `DETMATH_RANGE` below).
 // - `k_sin.c` `__kernel_sin` and `k_cos.c` `__kernel_cos` (fdlibm 5.3, with
 //   the `qx` / `hz` split for |x| >= 0.3), coefficients and Horner order
 //   unchanged.
@@ -36,8 +50,10 @@
 //   on `n & 3`.
 //
 // Why this is deterministic: ECMAScript specifies `+ - * /` and `Math.sqrt`
-// as correctly rounded IEEE 754 double operations, `Math.abs` and
-// `Math.floor` exactly, and never contracts a multiply and an add into an FMA.
+// as correctly rounded IEEE 754 double operations, `Math.abs`, `Math.floor`
+// and the Number remainder `%` exactly (`%` is r = n - d·q on the
+// mathematical values, which is always representable, so it is exact), and
+// never contracts a multiply and an add into an FMA.
 // This file uses only those, comparisons, integer bit operations, a
 // DataView to read a double's high word (exact) and Float64Array scratch
 // slots (which store a double exactly). A fixed sequence of them
@@ -47,6 +63,13 @@
 // No `Math.sin / cos / tan / pow / exp / log` and no `**` anywhere below:
 // every constant is a double literal whose exact bits are in its comment (a
 // test checks each literal against its comment).
+//
+// NaN in, NaN out: NaN and ±Infinity return the `NaN` literal, never an
+// arithmetic NaN (`x - x`), whose sign / payload bits differ between engines
+// and CPUs. Even so, a NaN's bit pattern is never portable in JavaScript —
+// writing one to a typed array or DataView may store any NaN encoding
+// (ECMAScript SetValueInBuffer leaves it to the implementation) — so a hash
+// over doubles must canonicalize NaN, as the core's `hashState` does.
 //
 // This module imports nothing, so the `/detmath` entry is self-contained.
 
@@ -62,11 +85,23 @@ export interface SinCos {
  * result: `|x| <= DETMATH_RANGE` = 2^19 · π/2 ≈ 823,549.66 radians (the double
  * nearest 2^18 · π, bits `0x412921FB_54442D18`).
  *
- * Beyond it the result is still deterministic — the same operations on every
- * engine — but accuracy drops as |x| grows (and for very large |x| the value
- * is meaningless). Development builds warn once.
+ * Beyond it (finite |x| > DETMATH_RANGE) x is first reduced as
+ * `x % (2 * Math.PI)` — ECMAScript's `%` is exact, so this is the same double
+ * on every engine — and the reduced value goes through the in-range path. The
+ * result is deterministic, finite and in [-1, 1] for every finite x (with
+ * sin² + cos² ≈ 1), but it is the sine of x minus a multiple of the *double*
+ * 2π (`0x401921FB_54442D18`), which is about 2.45e-16 short of the real 2π:
+ * it differs from the true sin(x) by up to about |x| · 3.9e-17 (≈ 3e-11 at
+ * DETMATH_RANGE, ≈ 0.35 at 2^53), and for |x| beyond ~2^56 it bears no useful
+ * relation to sin(x). Development builds warn once.
  */
 export const DETMATH_RANGE = 823549.6645826427; // 0x412921FB, 0x54442D18
+
+/**
+ * `2 * Math.PI` as a double — the modulus for inputs beyond
+ * {@link DETMATH_RANGE}. Not 2π: the double nearest it.
+ */
+const TWO_PI_DOUBLE = 6.283185307179586; // 0x401921FB, 0x54442D18
 
 // ---- e_rem_pio2.c constants ---------------------------------------------------
 
@@ -135,10 +170,24 @@ function warnOutOfRange(x: number): void {
   _warned = true;
   console.warn(
     `[r3f-projectiles] detSin / detCos: |x| = ${Math.abs(x)} is beyond DETMATH_RANGE ` +
-      `(2^19 * pi/2 = ${DETMATH_RANGE}). The result is still deterministic on every ` +
-      'engine but no longer accurate to 1 ulp. Wrap angles into range first. ' +
-      '(Shown once.)',
+      `(2^19 * pi/2 = ${DETMATH_RANGE}). It is reduced as x % (2 * Math.PI) first: ` +
+      'the result is deterministic on every engine and in [-1, 1], but it is not ' +
+      'the true sine / cosine of x (the double 2*pi is not 2*pi; the error grows ' +
+      'with |x|). Wrap angles into range first. (Shown once.)',
   );
+}
+
+/**
+ * A finite x with |x| > DETMATH_RANGE, reduced to `x % TWO_PI_DOUBLE`
+ * (|result| < 2π, sign of x kept). `%` is exact, so the result is the same
+ * double on every engine; the callers then run their in-range path on it, so
+ * `detSin(x) === detSin(x % (2 * Math.PI))` bit for bit. (The high-word test
+ * the callers do first, `ix >= 0x412921fb`, is DETMATH_RANGE's high word: in
+ * range, only a few inputs near the end pay the `Math.abs` compare.)
+ */
+function beyondRange(x: number): number {
+  if (DEV) warnOutOfRange(x);
+  return x % TWO_PI_DOUBLE;
 }
 
 // ---- __ieee754_rem_pio2 (medium path) ------------------------------------------
@@ -166,14 +215,15 @@ function warnOutOfRange(x: number): void {
 const _y = new Float64Array(2);
 
 /**
- * Reduce x = `_y[0]` (|x| > pi/4, finite) by pi/2: overwrites `_y` with the
+ * Reduce x = `_y[0]` (pi/4 < |x| <= DETMATH_RANGE; the callers reduce
+ * anything larger modulo 2π first) by pi/2: overwrites `_y` with the
  * remainder as the head/tail pair `_y[0]` + `_y[1]` (|_y[0]| <= ~pi/4) and
  * returns the quadrant `n & 3`, with x ≈ n·pi/2 + remainder. (fdlibm tests
  * the sign as `hx < 0`; for a nonzero, non-NaN x that is exactly `x < 0`.)
  *
- * n itself is a double: within the range `|n| < 2^20` and an integer. The
- * quadrant is `n & 3` (ToInt32 being modular, well defined and
- * engine-independent for any finite n), taken here rather than by the callers
+ * n itself is a double: an integer with `|n| <= 2^19`. The quadrant is
+ * `n & 3` (ToInt32 being modular, well defined and engine-independent), taken
+ * here rather than by the callers
  * so the return value is a small integer.
  */
 function remPio2(): number {
@@ -282,12 +332,17 @@ function kernelCos(): void {
  * of the correctly rounded `sin(x)` for `|x| <= DETMATH_RANGE`.
  *
  * `detSin(NaN)`, `detSin(±Infinity)` are `NaN`; `detSin(-0)` is `-0`.
- * Beyond {@link DETMATH_RANGE} the result is deterministic but inaccurate
- * (development builds warn once).
+ * Beyond {@link DETMATH_RANGE} it is `detSin(x % (2 * Math.PI))`:
+ * deterministic and in [-1, 1], but not the true sine of x (development
+ * builds warn once).
  */
 export function detSin(x: number): number {
-  const ix = highWord(x) & 0x7fffffff;
-  if (ix >= 0x7ff00000) return x - x; // NaN, ±Infinity -> NaN
+  let ix = highWord(x) & 0x7fffffff;
+  if (ix >= 0x7ff00000) return NaN; // NaN, ±Infinity -> NaN (the literal; see header)
+  if (ix >= 0x412921fb && Math.abs(x) > DETMATH_RANGE) {
+    x = beyondRange(x);
+    ix = highWord(x) & 0x7fffffff;
+  }
   _y[0] = x;
   _y[1] = 0;
   if (ix <= 0x3fe921fb) {
@@ -295,7 +350,6 @@ export function detSin(x: number): number {
     kernelSin(0);
     return _k[0];
   }
-  if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
   switch (remPio2()) {
     case 0:
       kernelSin(1);
@@ -317,12 +371,17 @@ export function detSin(x: number): number {
  * 1 ulp of the correctly rounded `cos(x)` for `|x| <= DETMATH_RANGE`.
  *
  * `detCos(NaN)`, `detCos(±Infinity)` are `NaN`; `detCos(0) === 1`.
- * Beyond {@link DETMATH_RANGE} the result is deterministic but inaccurate
- * (development builds warn once).
+ * Beyond {@link DETMATH_RANGE} it is `detCos(x % (2 * Math.PI))`:
+ * deterministic and in [-1, 1], but not the true cosine of x (development
+ * builds warn once).
  */
 export function detCos(x: number): number {
-  const ix = highWord(x) & 0x7fffffff;
-  if (ix >= 0x7ff00000) return x - x; // NaN, ±Infinity -> NaN
+  let ix = highWord(x) & 0x7fffffff;
+  if (ix >= 0x7ff00000) return NaN; // NaN, ±Infinity -> NaN (the literal; see header)
+  if (ix >= 0x412921fb && Math.abs(x) > DETMATH_RANGE) {
+    x = beyondRange(x);
+    ix = highWord(x) & 0x7fffffff;
+  }
   _y[0] = x;
   _y[1] = 0;
   if (ix <= 0x3fe921fb) {
@@ -330,7 +389,6 @@ export function detCos(x: number): number {
     kernelCos();
     return _k[1];
   }
-  if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
   switch (remPio2()) {
     case 0:
       kernelCos();
@@ -360,11 +418,15 @@ export function detCos(x: number): number {
  * ```
  */
 export function detSinCos(x: number, out: SinCos): SinCos {
-  const ix = highWord(x) & 0x7fffffff;
+  let ix = highWord(x) & 0x7fffffff;
   if (ix >= 0x7ff00000) {
-    // NaN, ±Infinity -> NaN
-    out.s = out.c = x - x;
+    // NaN, ±Infinity -> NaN (the literal; see header)
+    out.s = out.c = NaN;
     return out;
+  }
+  if (ix >= 0x412921fb && Math.abs(x) > DETMATH_RANGE) {
+    x = beyondRange(x);
+    ix = highWord(x) & 0x7fffffff;
   }
   _y[0] = x;
   _y[1] = 0;
@@ -372,7 +434,6 @@ export function detSinCos(x: number, out: SinCos): SinCos {
   let iy = 0;
   let quadrant = 0;
   if (ix > 0x3fe921fb) {
-    if (DEV && Math.abs(x) > DETMATH_RANGE) warnOutOfRange(x);
     quadrant = remPio2();
     iy = 1;
   }

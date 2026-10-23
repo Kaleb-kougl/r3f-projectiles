@@ -56,7 +56,7 @@ const MATRIX_STRIDE = 16;
 
 /**
  * Scratch for the built-in orbit's `detSinCos` (0.8.0; was `Math.cos` /
- * `Math.sin`, bit-identical on V8). Written and read within one statement
+ * `Math.sin`, bit-identical to them in Node). Written and read within one statement
  * pair, so one module-scope object serves every field.
  */
 const _orbitSC: SinCos = { s: 0, c: 0 };

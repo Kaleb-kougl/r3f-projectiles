@@ -610,8 +610,8 @@ export function Bullets({ game }: { game: Game }) {
 | `activeCount` / `activeCountFor(id)` | `number` / `(id: number) => number` | Live bullets, delayed ones included. |
 | `forEachActive(cb)` | `(cb: (i, pos, payload, emitterId) => boolean \| void) => void` | Walk live, visible bullets; return `true` to consume. Reentrant for `fireAt` and `setPayload`. |
 | `setPayload(i, payload)` | `(index: number, payload: number) => void` | Write-back half of `forEachActive`. Ignored for a slot that is not live. |
-| `writeStateHash(out)` | `(out: number[]) => void` | Append `index, x, y, z, vx, vy, vz, life, payload, emitterId` for every live bullet, ascending slot order. Feed it to your own hash. |
-| `hashState()` | `() => number` | A 32-bit hash over the exact bits of the same values (plus the live count). For replay checks and desync detection; not cryptographic. |
+| `writeStateHash(out)` | `(out: number[]) => void` | Append `index, x, y, z, vx, vy, vz, life, payload, emitterId` for every live bullet, ascending slot order. Feed it to your own hash (canonicalize NaN if it reads raw bits: a NaN's bit pattern is not portable between engines). |
+| `hashState()` | `() => number` | A 32-bit hash over the exact bits of the same values (plus the live count); every NaN hashes as the canonical `0x7FF8000000000000`. For replay checks and desync detection; not cryptographic. |
 | `stepCount` | `number` | Steps taken. A free tick counter. |
 | `boundsLimit`, `boundsCenter`, `fadeTime`, `fadeCurve`, `onPoolExhausted` | mutable | As the options; read at step time. `boundsCenter` takes a `{ current }` ref, a getter, or a live vector. |
 | `capacity`, `interpolation` | `number`, `boolean` | Fixed at creation. |
@@ -672,9 +672,9 @@ turret.dir.z = sc.c;
 | `SinCos` | type | `{ s: number; c: number }`. |
 
 - **Same bits on every engine.** It is a port of fdlibm 5.3 (`e_rem_pio2`'s medium path, a three-part Cody–Waite reduction by π/2 with both refinement rounds, then `k_sin` / `k_cos`), built only from `+ − × ÷`, `Math.sqrt`, `Math.abs`, `Math.floor` and reads of a double's bits. Every one of those is exactly specified, so any conforming engine gives the same result.
-- **Accurate.** Within 1 ulp of the correctly rounded value for `|x| ≤ DETMATH_RANGE`, checked against 4,705 references computed with mpmath at 200 bits: the worst case is 1 ulp (87 sines and 108 cosines), and every other value is correctly rounded. V8's own `Math.sin` / `Math.cos` are also fdlibm ports, and they matched these bit for bit on every reference and on a million random inputs (checked once on Node 22), which is why the patterns' output did not move on Chrome, Node or Electron.
-- **Beyond `DETMATH_RANGE`** the result is still deterministic but less accurate as `|x|` grows; development builds warn once. Wrap long-running angles into range yourself.
-- **Edge cases.** `NaN` and `±Infinity` give `NaN`; the sign of zero is kept (`detSin(-0)` is `-0`); `detSin(0) === 0` and `detCos(0) === 1` exactly.
+- **Accurate.** Within 1 ulp of the correctly rounded value for `|x| ≤ DETMATH_RANGE`, checked against 4,705 references computed with mpmath at 200 bits: the worst case is 1 ulp (87 sines and 108 cosines), and every other value is correctly rounded. Node's own `Math.sin` / `Math.cos` are an fdlibm port too, and they matched these bit for bit on every reference and on a million random inputs (checked on Node 22), which is why the patterns' output did not move in Node. Chromium's (Chrome, Edge, Electron) are not the same: they differ from `detSin` in the last bit on about 3% of random inputs, so in browsers and Electron, as in Firefox and Safari, some 0.8.0 bullets differ from 0.7.0's in the last bit (and now equal Node's).
+- **Beyond `DETMATH_RANGE`** (any finite `|x| > DETMATH_RANGE`), `x` is first reduced as `x % (2 * Math.PI)` — JavaScript's `%` is exact, so this is the same double on every engine — and the result is `detSin(x % (2 * Math.PI))` bit for bit. So it is deterministic, finite and in `[-1, 1]` for every finite input, with `sin² + cos²` as close to 1 as in range, **but it is not the true sine of `x`**: `2 * Math.PI` is the double nearest 2π, about 2.45e-16 short, so the result is off by up to about `|x| · 3.9e-17` (≈ 3e-11 just past the range, ≈ 0.35 at 2^53) and past ~2^56 it has no useful relation to `sin(x)`. Development builds warn once. Wrap long-running angles into range yourself.
+- **Edge cases.** `NaN` and `±Infinity` give `NaN` (the `NaN` literal, not an arithmetic NaN); the sign of zero is kept (`detSin(-0)` is `-0`); `detSin(0) === 0` and `detCos(0) === 1` exactly. A NaN's *bit pattern* is never portable in JavaScript — an engine may store any NaN encoding in a typed array or `DataView` — so if you hash doubles yourself, canonicalize NaN first, as `hashState()` does.
 - **Imports nothing**: no `three`, no React. `/detmath` is the smallest entry; the same exports are also on the root, `/patterns` and `/core`.
 - **Its bits are part of the version contract**, like the patterns': changing an output is at least a minor bump with a changelog line.
 
@@ -1305,7 +1305,7 @@ MIT — [Kaleb Kougl](https://github.com/Kaleb-Kougl)
 
 ### Third-party notice
 
-`src/detmath.ts` is a port of fdlibm 5.3 (netlib.org/fdlibm), whose notice is preserved there and in [LICENSE](./LICENSE):
+`src/detmath.ts` is a port of fdlibm 5.3 (netlib.org/fdlibm), whose notice is preserved there, in the built files (a legal comment at the end of the chunk that holds `detSin`) and in [LICENSE](./LICENSE):
 
 > Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
 >

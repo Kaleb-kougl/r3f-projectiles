@@ -17,4 +17,10 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   external: ["react", "react-dom", "@react-three/fiber", "three"],
+  esbuildOptions(options) {
+    // Keep `/*! ... */` legal comments — src/detmath.ts' fdlibm notice — at
+    // the end of each output file (esbuild's default for bundles, pinned
+    // here). Pinned by src/__tests__/bundle.detmath.test.ts.
+    options.legalComments = "eof";
+  },
 });
